@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import random
 import time
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,6 +20,7 @@ class RetryPolicy:
     initial_delay: float = 1.0
     max_delay: float = 8.0
     jitter: float = 0.25
+    rate_limit_delay: float = 60.0
 
     def delay(self, attempt: int) -> float:
         base = min(self.max_delay, self.initial_delay * (2 ** max(0, attempt - 1)))
@@ -27,6 +29,23 @@ class RetryPolicy:
 
 def is_retryable_status(status: int) -> bool:
     return status in RETRYABLE_STATUS_CODES or 500 <= status <= 599
+
+
+def retry_after_seconds(headers: dict[str, str]) -> float | None:
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value.strip()))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            return None
+        return max(0.0, retry_at.timestamp() - time.time())
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def sha256_bytes(body: bytes) -> str:
@@ -106,8 +125,15 @@ def _download_response_sync(context, url: str, headers: dict[str, str], timeout_
             response = context.request.get(url, headers=headers or None, timeout=timeout_ms)
             status = response.status
             if is_retryable_status(status):
+                retry_after = retry_after_seconds(dict(response.headers)) if status == 429 else None
                 response.dispose()
-                raise IOError(f"retryable HTTP status {status}")
+                if attempt >= policy.max_attempts:
+                    raise IOError(f"retryable HTTP status {status}")
+                delay = max(policy.rate_limit_delay, retry_after or 0.0) if status == 429 else policy.delay(attempt)
+                if logger:
+                    logger.debug(f"    retry {attempt}/{policy.max_attempts - 1} in {delay:.1f}s: HTTP {status}")
+                time.sleep(delay)
+                continue
             return response
         except Exception as exc:
             if attempt >= policy.max_attempts:
@@ -125,8 +151,15 @@ async def _download_response_async(context, url: str, headers: dict[str, str], t
             response = await context.request.get(url, headers=headers or None, timeout=timeout_ms)
             status = response.status
             if is_retryable_status(status):
+                retry_after = retry_after_seconds(dict(response.headers)) if status == 429 else None
                 await response.dispose()
-                raise IOError(f"retryable HTTP status {status}")
+                if attempt >= policy.max_attempts:
+                    raise IOError(f"retryable HTTP status {status}")
+                delay = max(policy.rate_limit_delay, retry_after or 0.0) if status == 429 else policy.delay(attempt)
+                if logger:
+                    logger.debug(f"    retry {attempt}/{policy.max_attempts - 1} in {delay:.1f}s: HTTP {status}")
+                await asyncio.sleep(delay)
+                continue
             return response
         except Exception as exc:
             if attempt >= policy.max_attempts:

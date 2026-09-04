@@ -170,3 +170,15 @@ def test_cli_exposes_sleep_for_all_stages():
         result = runner.invoke(app, [command, "--help"])
         assert result.exit_code == 0
         assert "--sleep" in result.stdout
+
+
+def test_retry_after_seconds_parses_delta_and_http_date():
+    from datetime import datetime, timezone, timedelta
+    from email.utils import format_datetime
+    from linkedin_archiver.downloader import retry_after_seconds
+
+    assert retry_after_seconds({"retry-after": "12"}) == 12.0
+    future = datetime.now(timezone.utc) + timedelta(seconds=3)
+    delay = retry_after_seconds({"retry-after": format_datetime(future, usegmt=True)})
+    assert delay is not None
+    assert 0 <= delay <= 4

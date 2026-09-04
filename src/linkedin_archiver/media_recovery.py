@@ -13,6 +13,8 @@ import mimetypes
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from linkedin_archiver.downloader import RetryPolicy, atomic_write_bytes, download_async, sha256_bytes, sha256_file
+
 MEDIA_CONTENT_PREFIXES = ("image/", "audio/", "video/")
 MEDIA_CONTENT_TYPES = {"application/pdf", "application/zip"}
 MEDIA_EXTENSIONS = {
@@ -41,18 +43,31 @@ class MediaCapture:
     def has_source(self, source_url: str) -> bool:
         return source_url in self._seen_saved_sources
 
-    def add_saved(self, path: Path, *, source_url: str, content_type: str | None, media_kind: str) -> None:
-        if source_url in self._seen_saved_sources:
-            return
+    def add_saved(
+        self,
+        path: Path,
+        *,
+        source_url: str,
+        content_type: str | None,
+        media_kind: str,
+        sha256: str | None = None,
+    ) -> bool:
+        if source_url in self._seen_saved_sources or (sha256 and sha256 in self._seen_hashes):
+            return False
         self._seen_saved_sources.add(source_url)
+        if sha256:
+            self._seen_hashes.add(sha256)
         self._saved.append(
             {
                 "type": content_type or "application/octet-stream",
                 "url": source_url,
                 "file": path.name,
                 "kind": media_kind,
+                "bytes": path.stat().st_size if path.exists() else 0,
+                "sha256": sha256 or sha256_file(path),
             }
         )
+        return True
 
     def spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -124,12 +139,15 @@ class MediaCapture:
         extension = _extension(url, content_type)
         path = self.unique_media_path(self.media_dir / f"media_{index:02d}{extension}")
         try:
-            path.write_bytes(body)
+            digest = sha256_bytes(body)
+            atomic_write_bytes(path, body)
         except Exception:
             return
 
         kind = content_type.split("/", 1)[0] if "/" in content_type else "media"
-        self.add_saved(path, source_url=url, content_type=content_type, media_kind=kind)
+        if not self.add_saved(path, source_url=url, content_type=content_type, media_kind=kind, sha256=digest):
+            path.unlink(missing_ok=True)
+            return
         if self.logger:
             self.logger.debug(f"    Saved media: {path.name} {content_type} {len(body)} bytes")
 
@@ -190,22 +208,24 @@ async def save_dom_media(context, page, media_dir: Path, referer: str, capture: 
         if capture.has_source(url):
             continue
         try:
-            response = await context.request.get(url, headers={"Referer": referer}, timeout=60_000)
-            if not response.ok:
-                await response.dispose()
-                continue
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            body = await response.body()
-            await response.dispose()
-            if not body or not _looks_like_media(url, content_type):
-                continue
-            if _is_fragmented_video(body=body, content_type=content_type):
-                continue
             digest = hashlib.sha1(url.encode()).hexdigest()[:10]
-            path = capture.unique_media_path(media_dir / f"media_{digest}{_extension(url, content_type)}")
-            path.write_bytes(body)
+            path = capture.unique_media_path(media_dir / f"media_{digest}{_extension(url, "application/octet-stream")}")
+            result = await download_async(
+                context,
+                url,
+                path,
+                referer=referer,
+                policy=RetryPolicy(),
+                logger=logger,
+            )
+            content_type = result["content_type"]
+            body = path.read_bytes()
+            if not _looks_like_media(url, content_type) or _is_fragmented_video(body=body, content_type=content_type):
+                path.unlink(missing_ok=True)
+                continue
             kind = content_type.split("/", 1)[0] if "/" in content_type else "media"
-            capture.add_saved(path, source_url=url, content_type=content_type, media_kind=kind)
+            if not capture.add_saved(path, source_url=url, content_type=content_type, media_kind=kind, sha256=result["sha256"]):
+                path.unlink(missing_ok=True)
         except Exception as exc:
             if logger:
                 logger.debug(f"    DOM media download failed: {url[:120]} ({exc})")

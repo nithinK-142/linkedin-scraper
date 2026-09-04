@@ -76,3 +76,48 @@ def test_state_store_migrates_legacy_manifests(tmp_path: Path):
     with StateStore(root) as state:
         assert state.get_post("123")["status"] == "media_failed"
         assert state.get_recovery("123")["media_count"] == 2
+
+
+def test_download_sync_resumes_part_file(tmp_path: Path):
+    from linkedin_archiver.downloader import RetryPolicy, download_sync
+
+    class Response:
+        status = 206
+        ok = True
+        headers = {"content-type": "image/jpeg", "content-range": "bytes 5-9/10"}
+
+        def body(self):
+            return b"56789"
+
+        def dispose(self):
+            pass
+
+    class Request:
+        def __init__(self):
+            self.headers = None
+
+        def get(self, url, headers=None, timeout=None):
+            self.headers = headers
+            return Response()
+
+    class Context:
+        def __init__(self):
+            self.request = Request()
+
+    destination = tmp_path / "image.jpg"
+    Path(f"{destination}.part").write_bytes(b"01234")
+    context = Context()
+    result = download_sync(context, "https://example.test/image.jpg", destination, policy=RetryPolicy(max_attempts=1))
+    assert destination.read_bytes() == b"0123456789"
+    assert not Path(f"{destination}.part").exists()
+    assert context.request.headers["Range"] == "bytes=5-"
+    assert result["bytes"] == 10
+
+
+def test_retryable_status_codes():
+    from linkedin_archiver.downloader import is_retryable_status
+
+    assert is_retryable_status(429)
+    assert is_retryable_status(502)
+    assert not is_retryable_status(404)
+    assert not is_retryable_status(403)

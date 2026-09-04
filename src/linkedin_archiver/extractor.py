@@ -14,6 +14,7 @@ import mimetypes
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from linkedin_archiver.downloader import RetryPolicy, download_sync
 from linkedin_archiver.linkedin_data import activity_id_from_url
 
 # ---------------------------------------------------------- post content --
@@ -225,32 +226,51 @@ def guess_extension(url: str, content_type: str) -> str:
 
 
 def download_media(context, urls: set[str], media_dir: Path, referer: str) -> list[dict]:
-    """Download each URL via the browser's authenticated request context.
-    Returns metadata for every file actually saved; skips non-file
-    responses and failures rather than raising."""
+    """Download discovered media through the authenticated browser context."""
     media_dir.mkdir(parents=True, exist_ok=True)
     results = []
+    seen_hashes: set[str] = set()
 
     for index, url in enumerate(sorted(urls), start=1):
+        if url.lower().endswith((".m3u8", ".mpd")):
+            continue
+        temp_path = media_dir / f"media_{index:02d}.download"
         try:
-            response = context.request.get(url, headers={"Referer": referer}, timeout=60_000)
-
-            if not response.ok:
-                response.dispose()
+            result = download_sync(
+                context,
+                url,
+                temp_path,
+                referer=referer,
+                policy=RetryPolicy(),
+            )
+            content_type = result["content_type"]
+            if content_type in {
+                "text/html",
+                "application/json",
+                "application/x-mpegurl",
+                "application/vnd.apple.mpegurl",
+            }:
+                temp_path.unlink(missing_ok=True)
                 continue
 
-            content_type = response.headers.get("content-type", "").lower()
-            if "text/html" in content_type or "application/json" in content_type:
-                response.dispose()
+            digest = result["sha256"]
+            if digest in seen_hashes:
+                temp_path.unlink(missing_ok=True)
                 continue
+            seen_hashes.add(digest)
 
             extension = guess_extension(url, content_type)
             file_path = media_dir / f"media_{index:02d}{extension}"
-            file_path.write_bytes(response.body())
-            response.dispose()
-
-            results.append({"type": content_type, "url": url, "file": file_path.name})
+            temp_path.replace(file_path)
+            results.append({
+                "type": content_type,
+                "url": url,
+                "file": file_path.name,
+                "bytes": result["bytes"],
+                "sha256": digest,
+            })
         except Exception:
+            temp_path.unlink(missing_ok=True)
             continue
 
     return results

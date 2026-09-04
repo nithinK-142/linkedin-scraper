@@ -113,7 +113,7 @@ Progress is stored in `archive/state.sqlite3`. Old `manifest.json` files are imp
 uv run linkedin-scraper status
 ```
 
-Re-running skips completed work and retries unresolved posts.
+Re-running skips completed work. Downloads use `.part` files, resume HTTP ranges when supported, retry transient failures, and store SHA-256 hashes.
 
 ## Legacy scripts
 

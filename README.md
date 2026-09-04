@@ -264,26 +264,31 @@ project never handles credentials at all.
 ## 17. What changed from the original scripts
 
 - Browser hardcoded to Brave everywhere → generic Chromium-family
-  detection/selection (`browser_discovery.py`, `profiles.py`), with CLI
-  overrides for anyone on a browser we don't auto-detect.
+  detection/selection/profile discovery, with CLI overrides for anyone
+  on a browser we don't auto-detect.
 - `get_brave_profiles.py`'s Brave-only `Local State` parsing → reusable
-  `profiles.discover_profiles()` used by every script.
+  `discover_profiles()` used by every script.
 - Hardcoded CDP port 9222 → dynamic selection that reuses a live CDP
   endpoint on the preferred port, or finds a free one nearby.
 - Duplicated URL normalization / activity-ID regex across all three
-  scripts → single `linkedin_urls.py`.
+  scripts → single shared module.
 - Duplicated Brave-launch/attach logic (each script had its own
-  `ensure_brave` variant) → single `browser.py`, generalized to any
-  supported browser, using the most defensive version of the safety
-  checks (from the video-capture script) as the baseline everywhere.
+  `ensure_brave` variant) → single module, generalized to any supported
+  browser, using the most defensive version of the safety checks (from
+  the video-capture script) as the baseline everywhere.
 - `linkedin_video_capture.py`'s two hardcoded test URLs → `--url`
   (repeatable) and `--input` (any JSON list of URLs).
 - No manifest/resume in the original archiver → per-post status tracking
   with explicit failure states, safe to interrupt and rerun.
-- Config constants scattered through each script → `config.py` +
-  optional `config.json`.
+- Config constants scattered through each script → one settings module
+  plus optional `config.json`.
 - No structured logging in the originals (console `print()` only) →
   per-script log files plus console output.
+- `src/linkedin_archiver/` is deliberately kept to 5 small modules
+  (`browser.py`, `extractor.py`, `linkedin_data.py`, `settings.py`,
+  `video_capture.py`) rather than one file per concern — this is a
+  scraper/downloader, not a large system, and a flatter module layout
+  is easier to hold in your head.
 
 ## 18. What was preserved because it already worked
 

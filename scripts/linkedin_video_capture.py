@@ -25,14 +25,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from linkedin_archiver import config as cfg
-from linkedin_archiver import manifest as mf
+from linkedin_archiver import settings as cfg
+from linkedin_archiver import linkedin_data as mf
 from linkedin_archiver import video_capture as vc
-from linkedin_archiver.browser import BrowserSessionError, ensure_browser_session
-from linkedin_archiver.cli_common import add_browser_selection_args, resolve_browser_target
-from linkedin_archiver.linkedin_urls import activity_id_from_url
-from linkedin_archiver.logging_utils import setup_logging
-from linkedin_archiver.paths import default_failed_posts_file, default_saved_posts_file, default_video_output_dir
+from linkedin_archiver.browser import (
+    BrowserSessionError, ensure_browser_session,
+    add_browser_selection_args, resolve_browser_target,
+)
+from linkedin_archiver.linkedin_data import activity_id_from_url
+from linkedin_archiver.settings import setup_logging
+from linkedin_archiver.settings import default_failed_posts_file, default_saved_posts_file, default_video_output_dir
 
 from playwright.async_api import async_playwright
 from playwright.async_api import TimeoutError as PWTimeout

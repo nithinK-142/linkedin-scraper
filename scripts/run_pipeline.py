@@ -21,9 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from linkedin_archiver.logging_utils import setup_logging
-from linkedin_archiver.manifest import Status, load_manifest
-from linkedin_archiver.paths import archive_dir, default_failed_posts_file, default_saved_posts_file
+from linkedin_archiver.settings import setup_logging
+from linkedin_archiver.linkedin_data import Status, load_manifest
+from linkedin_archiver.settings import archive_dir, default_failed_posts_file, default_saved_posts_file
 
 
 def parse_args() -> argparse.Namespace:

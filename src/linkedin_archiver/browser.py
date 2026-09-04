@@ -1,33 +1,239 @@
-"""Safe attachment to a real, already-authenticated Chromium-family browser
-profile over the Chrome DevTools Protocol (CDP).
+"""Everything related to getting a usable, already-logged-in browser
+session: detecting installed Chromium-family browsers, discovering their
+profiles, safely attaching to (or launching) one over CDP, and the CLI
+flags that tie it together. This is Chromium/CDP-specific by design —
+the point is reusing an existing authenticated session, not automating a
+generic browser.
 
-Hard rules, carried over unchanged from the proven video-capture script:
-
+Session safety rules (unchanged from the original proven scripts):
 * Never overwrite, delete, or reset the selected profile.
 * Never copy cookies into another profile or create a throwaway profile.
 * Never force a new LinkedIn login — always reuse the real session.
-* If a browser is already running on the target user-data-dir without a
-  debugging port, refuse to relaunch it (Chromium only honors
-  --remote-debugging-port on the *first* launch of a given user-data-dir;
-  forcing a second launch can misbehave). Ask the user to quit it first.
-* If something is already listening on the target port, verify it's an
-  actual CDP endpoint before trusting it, and get explicit human
-  confirmation that it's the right profile — we cannot verify that
+* Refuse to relaunch a browser that's already running without a debug
+  port (Chromium only honors --remote-debugging-port on first launch of
+  a user-data-dir).
+* If something's already listening on the CDP port, confirm with the
+  user that it's the right profile — that can't be verified
   programmatically.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import socket
 import subprocess
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
-from linkedin_archiver.browser_discovery import BrowserSpec
 
+# ============================================================ detection ===
+
+@dataclass(frozen=True)
+class BrowserSpec:
+    key: str
+    display_name: str
+    executable_names: tuple[str, ...]
+    fixed_paths: tuple[str, ...]
+    user_data_dirs: tuple[str, ...]  # relative to $HOME, first existing one wins
+
+
+SUPPORTED_BROWSERS: dict[str, BrowserSpec] = {
+    "brave": BrowserSpec(
+        key="brave",
+        display_name="Brave",
+        executable_names=("brave-browser", "brave-browser-stable", "brave"),
+        fixed_paths=(
+            "/usr/bin/brave-browser",
+            "/usr/bin/brave-browser-stable",
+            "/usr/bin/brave",
+            "/opt/brave.com/brave/brave",
+            "/snap/bin/brave",
+        ),
+        user_data_dirs=(".config/BraveSoftware/Brave-Browser",),
+    ),
+    "chrome": BrowserSpec(
+        key="chrome",
+        display_name="Google Chrome",
+        executable_names=("google-chrome-stable", "google-chrome", "chrome"),
+        fixed_paths=(
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome",
+            "/opt/google/chrome/chrome",
+        ),
+        user_data_dirs=(".config/google-chrome",),
+    ),
+    "chromium": BrowserSpec(
+        key="chromium",
+        display_name="Chromium",
+        executable_names=("chromium-browser", "chromium"),
+        fixed_paths=(
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/snap/bin/chromium",
+        ),
+        user_data_dirs=(".config/chromium",),
+    ),
+}
+
+
+def find_executable(spec: BrowserSpec, explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit if Path(explicit).exists() else None
+    for name in spec.executable_names:
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in spec.fixed_paths:
+        if Path(path).exists():
+            return path
+    return None
+
+
+def find_user_data_dir(spec: BrowserSpec, explicit: str | None = None) -> Path | None:
+    if explicit:
+        path = Path(explicit).expanduser()
+        return path if path.exists() else None
+    home = Path.home()
+    for relative in spec.user_data_dirs:
+        candidate = home / relative
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def detect_installed_browsers() -> list[BrowserSpec]:
+    return [
+        spec for spec in SUPPORTED_BROWSERS.values()
+        if find_executable(spec) and find_user_data_dir(spec)
+    ]
+
+
+def resolve_browser(key_or_index: str, available: list[BrowserSpec]) -> BrowserSpec:
+    """Accepts a browser key, a display name (case-insensitive), or a
+    1-based index into ``available``."""
+    if key_or_index.isdigit():
+        idx = int(key_or_index)
+        if 1 <= idx <= len(available):
+            return available[idx - 1]
+        raise ValueError(f"--browser index {idx} is out of range (1-{len(available)}).")
+
+    lowered = key_or_index.lower()
+
+    if lowered in SUPPORTED_BROWSERS:
+        spec = SUPPORTED_BROWSERS[lowered]
+        if spec in available:
+            return spec
+        raise ValueError(
+            f"'{spec.display_name}' was not detected on this machine "
+            f"(no executable or no user-data directory found)."
+        )
+
+    for spec in available:
+        if spec.display_name.lower() == lowered:
+            return spec
+
+    raise ValueError(
+        f"--browser '{key_or_index}' did not match any detected browser. "
+        f"Detected: {[s.key for s in available]}"
+    )
+
+
+def choose_browser_interactive(available: list[BrowserSpec]) -> BrowserSpec:
+    if not available:
+        raise RuntimeError(
+            "No supported Chromium-family browser was detected "
+            "(checked Brave, Google Chrome, Chromium). "
+            "Use --browser-path / --user-data-dir to point at one explicitly."
+        )
+    if len(available) == 1:
+        return available[0]
+
+    print("Browser:\n")
+    for index, spec in enumerate(available, start=1):
+        print(f"{index}. {spec.display_name}")
+
+    while True:
+        choice = input("\nSelect browser: ").strip()
+        try:
+            return resolve_browser(choice, available)
+        except ValueError as exc:
+            print(str(exc))
+
+
+# ============================================================= profiles ===
+
+@dataclass(frozen=True)
+class Profile:
+    directory: str  # on-disk folder name, e.g. "Default", "Profile 4"
+    display_name: str  # human-friendly name shown in the browser's UI
+    user_name: str = ""  # associated account email/name, if any
+
+
+def discover_profiles(user_data_dir: Path) -> list[Profile]:
+    local_state_path = user_data_dir / "Local State"
+
+    if not local_state_path.exists():
+        raise FileNotFoundError(f"Local State not found: {local_state_path}")
+
+    data = json.loads(local_state_path.read_text(encoding="utf-8"))
+    info_cache = data.get("profile", {}).get("info_cache", {})
+
+    if not info_cache:
+        raise RuntimeError(f"No profiles found in {local_state_path}")
+
+    profiles = [
+        Profile(
+            directory=directory,
+            display_name=info.get("name") or info.get("shortcut_name") or directory,
+            user_name=info.get("user_name", "") or "",
+        )
+        for directory, info in info_cache.items()
+    ]
+    profiles.sort(key=lambda p: p.directory)
+    return profiles
+
+
+def resolve_profile(arg: str, profiles: list[Profile]) -> Profile:
+    """Accepts a 1-based index, the on-disk directory name, or the
+    display name shown in the browser (case-insensitive)."""
+    if arg.isdigit():
+        idx = int(arg)
+        if 1 <= idx <= len(profiles):
+            return profiles[idx - 1]
+        raise ValueError(f"--profile index {idx} is out of range (1-{len(profiles)}).")
+
+    for profile in profiles:
+        if arg == profile.directory or arg.lower() == profile.display_name.lower():
+            return profile
+
+    raise ValueError(
+        f"--profile '{arg}' did not match any profile directory or display name. "
+        f"Known profiles: {[p.directory for p in profiles]}"
+    )
+
+
+def choose_profile_interactive(profiles: list[Profile]) -> Profile:
+    if not profiles:
+        raise RuntimeError("No profiles found.")
+
+    print("Profiles:\n")
+    for index, profile in enumerate(profiles, start=1):
+        extra = f"  ({profile.user_name})" if profile.user_name else ""
+        print(f"{index}. {profile.display_name}{extra}  [dir: {profile.directory}]")
+
+    while True:
+        choice = input("\nSelect profile: ").strip()
+        try:
+            return resolve_profile(choice, profiles)
+        except ValueError as exc:
+            print(str(exc))
+
+
+# =========================================================== CDP session ==
 
 class BrowserSessionError(RuntimeError):
     """Raised when we cannot safely establish a CDP session."""
@@ -57,10 +263,8 @@ def cdp_http_url(port: int) -> str:
 
 
 def is_port_free(port: int) -> bool:
-    """True if nothing is bound to ``port`` on localhost. Uses a bind
-    attempt (not connect()) so it's correct even against a listener whose
-    accept backlog is saturated — connect-based checks can misreport a
-    busy port as free in that case."""
+    """Bind-based check (not connect()) so it's correct even against a
+    listener whose accept backlog is saturated."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -71,22 +275,13 @@ def is_port_free(port: int) -> bool:
 
 
 def select_cdp_port(preferred: int, scan_range: int = 20) -> int:
-    """Pick a CDP port to launch a *new* browser instance on.
-
-    If a CDP endpoint is already listening on ``preferred``, that's a
-    candidate for reuse (handled separately in ``ensure_browser_session``)
-    rather than something to route around here. This function is only for
-    choosing a port to launch a fresh instance on, so it looks for a port
-    that is entirely free.
-    """
+    """Pick a free port to launch a *new* browser instance on."""
     if is_port_free(preferred):
         return preferred
-
     for offset in range(1, scan_range + 1):
         candidate = preferred + offset
         if is_port_free(candidate):
             return candidate
-
     raise BrowserSessionError(
         f"Could not find a free port near {preferred} "
         f"(scanned {preferred}-{preferred + scan_range})."
@@ -111,14 +306,11 @@ def is_browser_process_running(spec: BrowserSpec) -> bool:
     try:
         result = subprocess.run(
             ["pgrep", "-f", "-i", spec.executable_names[0]],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
         )
         return result.returncode == 0 and bool(result.stdout.strip())
     except FileNotFoundError:
-        # No psutil, no pgrep: genuinely cannot tell. Caller decides how to
-        # proceed cautiously.
-        return False
+        return False  # no psutil, no pgrep: genuinely cannot tell
 
 
 def wait_for_cdp_port(port: int, timeout: float) -> bool:
@@ -131,11 +323,8 @@ def wait_for_cdp_port(port: int, timeout: float) -> bool:
 
 
 def launch_browser(
-    executable: str,
-    user_data_dir: Path,
-    profile_directory: str,
-    port: int,
-    start_url: str | None = None,
+    executable: str, user_data_dir: Path, profile_directory: str,
+    port: int, start_url: str | None = None,
 ) -> subprocess.Popen:
     args = [
         executable,
@@ -147,34 +336,19 @@ def launch_browser(
     ]
     if start_url:
         args.append(start_url)
-
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def ensure_browser_session(
-    spec: BrowserSpec,
-    executable: str,
-    user_data_dir: Path,
-    profile_directory: str,
-    port: int,
-    *,
-    start_url: str | None = None,
-    logger=None,
-    assume_yes: bool = False,
+    spec: BrowserSpec, executable: str, user_data_dir: Path, profile_directory: str, port: int,
+    *, start_url: str | None = None, logger=None, assume_yes: bool = False,
 ) -> str:
-    """Return a usable CDP HTTP endpoint for the requested profile, or raise
-    ``BrowserSessionError`` with a clear explanation of what to do.
-
-    This never launches Playwright's bundled Chromium and never creates,
-    copies, or resets a profile. It only ever attaches to, or launches,
-    the real browser executable the caller already has installed.
-    """
+    """Return a usable CDP HTTP endpoint, or raise BrowserSessionError.
+    Never launches Playwright's bundled Chromium; never creates, copies,
+    or resets a profile."""
 
     def log(message: str) -> None:
-        if logger is not None:
-            logger.info(message)
-        else:
-            print(message)
+        (logger.info if logger else print)(message)
 
     if is_cdp_port_open(port):
         if get_cdp_ws_url(port) is None:
@@ -231,9 +405,89 @@ def ensure_browser_session(
 
 
 def find_or_open_page(context, url_hint: str = "linkedin.com"):
-    """Reuse an existing tab already on ``url_hint`` if one exists,
-    otherwise open a new tab in the same (real) browser context."""
+    """Reuse an existing tab already on ``url_hint``, else open a new one
+    in the same (real) browser context."""
     for existing_page in context.pages:
         if url_hint in existing_page.url:
             return existing_page
     return context.new_page()
+
+
+# ================================================================== CLI ===
+
+def add_browser_selection_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("browser/profile selection")
+    group.add_argument(
+        "--browser",
+        help="Browser to use: brave, chrome, chromium (name, or number from the "
+             "interactive list). If omitted, you'll be prompted when more than "
+             "one supported browser is detected.",
+    )
+    group.add_argument("--browser-path", help="Explicit path to the browser executable.")
+    group.add_argument("--user-data-dir", help="Explicit path to the browser's user-data directory.")
+    group.add_argument(
+        "--profile",
+        help="Profile to use: directory name (e.g. 'Profile 4'), display name, "
+             "or number from the interactive list. If omitted, you'll be prompted.",
+    )
+    group.add_argument(
+        "--cdp-port", type=int, default=None,
+        help="Chrome DevTools Protocol port. Default: 9222, or the next free port near it.",
+    )
+
+
+@dataclass
+class ResolvedBrowserTarget:
+    spec: BrowserSpec
+    executable: str
+    user_data_dir: Path
+    profile: Profile
+    port: int
+
+
+def _pick_port(explicit: int | None, preferred: int) -> int:
+    """--cdp-port always wins. Otherwise: reuse the preferred port if
+    something already speaks CDP there; if it's free, use it; if it's
+    occupied by something else, pick a nearby free port."""
+    if explicit:
+        return explicit
+    if is_cdp_port_open(preferred):
+        return preferred
+    if is_port_free(preferred):
+        return preferred
+    return select_cdp_port(preferred)
+
+
+def resolve_browser_target(args: argparse.Namespace, default_port: int) -> ResolvedBrowserTarget:
+    """Turn CLI args into a concrete (browser, profile, port), prompting
+    interactively for whatever wasn't specified."""
+
+    if args.browser_path or args.user_data_dir:
+        available = detect_installed_browsers()
+        if args.browser:
+            spec = resolve_browser(args.browser, available or list(SUPPORTED_BROWSERS.values()))
+        elif available:
+            spec = available[0]
+        else:
+            spec = SUPPORTED_BROWSERS["brave"]
+    else:
+        available = detect_installed_browsers()
+        spec = resolve_browser(args.browser, available) if args.browser else choose_browser_interactive(available)
+
+    executable = find_executable(spec, explicit=args.browser_path)
+    if not executable:
+        raise SystemExit(f"Could not locate the {spec.display_name} executable. Pass --browser-path explicitly.")
+
+    user_data_dir = find_user_data_dir(spec, explicit=args.user_data_dir)
+    if not user_data_dir:
+        raise SystemExit(f"Could not locate {spec.display_name}'s user-data directory. Pass --user-data-dir explicitly.")
+
+    discovered_profiles = discover_profiles(user_data_dir)
+    profile = resolve_profile(args.profile, discovered_profiles) if args.profile \
+        else choose_profile_interactive(discovered_profiles)
+
+    port = _pick_port(args.cdp_port, default_port)
+
+    return ResolvedBrowserTarget(
+        spec=spec, executable=executable, user_data_dir=user_data_dir, profile=profile, port=port,
+    )

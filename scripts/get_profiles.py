@@ -16,9 +16,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from linkedin_archiver import browser_discovery as bd
-from linkedin_archiver import profiles as pf
-from linkedin_archiver.logging_utils import setup_logging
+from linkedin_archiver import browser as bd
+from linkedin_archiver import browser as pf
+from linkedin_archiver.settings import setup_logging
 
 
 def parse_args() -> argparse.Namespace:

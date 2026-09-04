@@ -64,10 +64,9 @@ def limit_option():
 
 def sleep_option():
     return typer.Option(
-        0.0,
+        "0",
         "--sleep",
-        min=0.0,
-        help="Seconds to wait between LinkedIn page/post processing. Default: 0.",
+        help="Seconds to wait between LinkedIn page/post operations. Use N or MIN-MAX. Default: 0.",
     )
 
 
@@ -83,7 +82,7 @@ def profiles(
 def collect(
     output: Optional[Path] = typer.Option(None, "--output", "-o", help=f"Output JSON. Default: {default_saved_posts_file()}"),
     limit: Optional[int] = limit_option(),
-    sleep: float = sleep_option(),
+    sleep: str = sleep_option(),
     browser: Optional[str] = browser_options()[0],
     browser_path: Optional[str] = browser_options()[1],
     user_data_dir: Optional[str] = browser_options()[2],
@@ -98,6 +97,7 @@ def collect(
 def archive(
     input_file: Optional[Path] = typer.Option(None, "--input", "-i", help=f"Input JSON. Default: {default_saved_posts_file()}"),
     limit: Optional[int] = limit_option(),
+    sleep: str = sleep_option(),
     output_dir: Optional[Path] = typer.Option(None, "--output", "-o", help=f"Archive directory. Default: {archive_dir()}"),
     resume: bool = typer.Option(False, "--resume", help="Accepted for compatibility; resume is always enabled."),
     browser: Optional[str] = browser_options()[0],
@@ -115,6 +115,7 @@ def archive(
 def recover(
     url: list[str] = typer.Option([], "--url", help="Post URL. Repeat for multiple posts."),
     limit: Optional[int] = limit_option(),
+    sleep: str = sleep_option(),
     input_file: Optional[Path] = typer.Option(None, "--input", "-i", help="JSON list of post URLs."),
     output_dir: Optional[Path] = typer.Option(None, "--output", "-o", help="Recovery output root."),
     playback_timeout: Optional[int] = typer.Option(None, "--playback-timeout", min=1, help="Max video playback wait in seconds."),
@@ -143,7 +144,7 @@ def recover(
 def run(
     skip_recover: bool = typer.Option(False, "--skip-recover", "--skip-video-capture", help="Stop after archive."),
     limit: Optional[int] = limit_option(),
-    sleep: float = sleep_option(),
+    sleep: str = sleep_option(),
     browser: Optional[str] = browser_options()[0],
     browser_path: Optional[str] = browser_options()[1],
     user_data_dir: Optional[str] = browser_options()[2],

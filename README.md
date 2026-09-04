@@ -135,6 +135,6 @@ They now call the same CLI code.
 
 The selected browser profile is never reset, copied, or overwritten. The project does not store LinkedIn credentials, cookies, or session tokens.
 
-LinkedIn warns that automated activity can trigger restrictions, and unusually large numbers of page views in a short period can restrict viewing. `--sleep` reduces request/page frequency but does not guarantee against restrictions.
+LinkedIn warns that systematic automated page retrieval can trigger restrictions, including limits after unusually large page-view volume. The scraper therefore supports pacing, stops on HTTP 429 or restriction/security signals, and does not retry those signals. This reduces burst traffic; it does not bypass LinkedIn restrictions. citeturn671627search4turn240517search0
 
 LinkedIn's DOM and network behavior can change. The collector and recovery logic may need updates when LinkedIn changes.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable
@@ -27,6 +26,8 @@ from linkedin_archiver.browser import (
 from linkedin_archiver.media_recovery import MediaCapture, save_dom_media
 from linkedin_archiver.state import StateStore
 from linkedin_archiver.linkedin_data import activity_id_from_url, extract_activity_urls_from_text, normalize_url
+from linkedin_archiver.safety import SafetyMonitor, SafetyStop, inspect_url_and_text
+from linkedin_archiver.throttle import SleepInterval, parse_sleep
 from linkedin_archiver.settings import (
     archive_dir,
     default_failed_posts_file,
@@ -103,12 +104,59 @@ def _limit_items(items: list, limit: int | None) -> list:
     return items[:limit]
 
 
+def _sleep_interval(value: str | float | int | SleepInterval | None) -> SleepInterval:
+    return parse_sleep(value)
+
+
+def _log_sleep_interval(interval: SleepInterval, logger) -> None:
+    if not interval.enabled:
+        logger.info("Sleep: disabled")
+    elif interval.minimum == interval.maximum:
+        logger.info(f"Sleep: {interval.minimum:g}s")
+    else:
+        logger.info(f"Sleep: {interval.minimum:g}-{interval.maximum:g}s")
+
+
+def _check_page_safety(page, logger) -> None:
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+    signal = inspect_url_and_text(page.url, "", title)
+    if signal is None:
+        try:
+            body_text = page.locator("body").inner_text(timeout=2_000)[:20_000]
+        except Exception:
+            body_text = ""
+        signal = inspect_url_and_text(page.url, body_text, title)
+    if signal is not None:
+        logger.error(signal.message)
+        raise SafetyStop(signal)
+
+
+async def _check_page_safety_async(page, logger) -> None:
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    signal = inspect_url_and_text(page.url, "", title)
+    if signal is None:
+        try:
+            body_text = (await page.locator("body").inner_text(timeout=2_000))[:20_000]
+        except Exception:
+            body_text = ""
+        signal = inspect_url_and_text(page.url, body_text, title)
+    if signal is not None:
+        logger.error(signal.message)
+        raise SafetyStop(signal)
+
+
 def collect_saved_posts(
     target: ResolvedBrowserTarget,
     *,
     output: Path | None = None,
     limit: int | None = None,
-    sleep: float = 0.0,
+    sleep: str | float | SleepInterval = "0",
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -117,7 +165,8 @@ def collect_saved_posts(
     output = output or default_saved_posts_file()
     logger.info(f"Output file: {output}")
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
-    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
+    sleep_interval = _sleep_interval(sleep)
+    _log_sleep_interval(sleep_interval, logger)
     _log_target(target, logger)
 
     cdp_url = _ensure_session(
@@ -136,6 +185,8 @@ def collect_saved_posts(
 
         context = browser.contexts[0]
         page = find_or_open_page(context, url_hint="linkedin.com")
+        safety_monitor = SafetyMonitor()
+        page.on("response", lambda response: safety_monitor.observe_response(response.url, response.status))
         urls: list[str] = []
         seen: set[str] = set()
 
@@ -177,6 +228,8 @@ def collect_saved_posts(
                 timeout=cfg.PAGE_NAV_TIMEOUT_MS,
             )
             page.wait_for_timeout(5000)
+            safety_monitor.raise_if_triggered()
+            _check_page_safety(page, logger)
 
             if "login" in page.url.lower():
                 logger.error("LinkedIn is not logged in on this profile.")
@@ -187,6 +240,7 @@ def collect_saved_posts(
             last_scroll_y = -1
 
             for iteration in range(cfg.MAX_SCROLL_ITERATIONS):
+                safety_monitor.raise_if_triggered()
                 before = len(urls)
                 if limit is not None and len(urls) >= limit:
                     break
@@ -216,11 +270,13 @@ def collect_saved_posts(
 
                 if unchanged_rounds >= cfg.MAX_UNCHANGED_SCROLL_ROUNDS:
                     break
-                if sleep and iteration < cfg.MAX_SCROLL_ITERATIONS - 1:
-                    logger.info(f"Sleeping {sleep:g}s before next scan")
-                    time.sleep(sleep)
+                if sleep_interval.enabled and iteration < cfg.MAX_SCROLL_ITERATIONS - 1:
+                    sleep_interval.wait(logger, "before next scan")
         except KeyboardInterrupt:
             logger.warning("Stopped by user.")
+        except SafetyStop as exc:
+            logger.error(f"Safety stop: {exc.signal.message}")
+            return 3
         except Exception as exc:
             logger.warning(f"Browser/session stopped: {exc}")
         finally:
@@ -295,7 +351,7 @@ def archive_posts(
     input_file: Path | None = None,
     output_dir: Path | None = None,
     limit: int | None = None,
-    sleep: float = 0.0,
+    sleep: str | float | SleepInterval = "0",
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -321,7 +377,8 @@ def archive_posts(
 
     logger.info(f"Input: {input_file} ({len(urls)} URLs)")
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
-    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
+    sleep_interval = _sleep_interval(sleep)
+    _log_sleep_interval(sleep_interval, logger)
     logger.info(f"Output: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     state = StateStore(output_dir)
@@ -339,6 +396,8 @@ def archive_posts(
 
             context = browser.contexts[0]
             page = find_or_open_page(context, url_hint="linkedin.com")
+            safety_monitor = SafetyMonitor()
+            page.on("response", lambda response: safety_monitor.observe_response(response.url, response.status))
             skipped = completed = failed = 0
             page_visits = 0
 
@@ -349,9 +408,8 @@ def archive_posts(
                     skipped += 1
                     continue
 
-                if page_visits and sleep:
-                    logger.info(f"Sleeping {sleep:g}s before next post")
-                    time.sleep(sleep)
+                if page_visits and sleep_interval.enabled:
+                    sleep_interval.wait(logger, "before next post")
                 page_visits += 1
 
                 post_dir = output_dir / f"{index:04d}_{pid}"
@@ -359,6 +417,8 @@ def archive_posts(
                     logger.info(f"[{index}/{len(urls)}] {url}")
                     page.goto(url, wait_until="domcontentloaded", timeout=runtime_config.page_nav_timeout_ms)
                     page.wait_for_timeout(cfg.POST_SETTLE_TIMEOUT_MS)
+                    safety_monitor.raise_if_triggered()
+                    _check_page_safety(page, logger)
 
                     if "login" in page.url.lower():
                         raise RuntimeError("LinkedIn session expired (redirected to login).")
@@ -430,6 +490,9 @@ def archive_posts(
                 except KeyboardInterrupt:
                     logger.warning("Stopped by user.")
                     break
+                except SafetyStop as exc:
+                    logger.error(f"Safety stop: {exc.signal.message}")
+                    return 3
                 except Exception as exc:
                     current_url = ""
                     try:
@@ -512,8 +575,17 @@ async def _recover_one(
             logger.warning("  Navigation timed out; continuing.")
 
         current_url = page.url
-        if any(marker in current_url for marker in cfg.LOGIN_MARKERS):
-            logger.warning("  Login/authwall/challenge page detected.")
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        try:
+            body_text = (await page.locator("body").inner_text(timeout=2_000))[:20_000]
+        except Exception:
+            body_text = ""
+        signal = inspect_url_and_text(current_url, body_text, title)
+        if signal is not None:
+            raise SafetyStop(signal)
 
         # Capture media already represented in the DOM. This complements the
         # network listener and does not replace video fragment capture.
@@ -596,7 +668,7 @@ def recover_media(
     archive_root: Path | None = None,
     playback_timeout: int | None = None,
     limit: int | None = None,
-    sleep: float = 0.0,
+    sleep: str | float | SleepInterval = "0",
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -623,7 +695,8 @@ def recover_media(
         return 0
 
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
-    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
+    sleep_interval = _sleep_interval(sleep)
+    _log_sleep_interval(sleep_interval, logger)
 
     recovery_root = output_dir or archive_root
     recovery_root.mkdir(parents=True, exist_ok=True)
@@ -652,6 +725,8 @@ def recover_media(
                 return 1
             context = browser.contexts[0]
             page = await context.new_page()
+            safety_monitor = SafetyMonitor()
+            page.on("response", lambda response: safety_monitor.observe_response(response.url, response.status))
 
             completed = failed = skipped = 0
             page_visits = 0
@@ -668,16 +743,18 @@ def recover_media(
                         skipped += 1
                         continue
 
-                    if page_visits and sleep:
-                        logger.info(f"Sleeping {sleep:g}s before next post")
-                        await asyncio.sleep(sleep)
+                    if page_visits and sleep_interval.enabled:
+                        await sleep_interval.wait_async(logger, "before next post")
                     page_visits += 1
 
                     logger.info(f"[{index}/{len(direct_urls)}] Recovering media: {url}")
                     try:
+                        safety_monitor.raise_if_triggered()
+                        await _check_page_safety_async(page, logger)
                         result = await _recover_one(
                             context, page, post_dir, url, playback_timeout, logger
                         )
+                        safety_monitor.raise_if_triggered()
                         state.record_recovery(
                             post_id,
                             index=archive_index,
@@ -696,6 +773,9 @@ def recover_media(
                     except KeyboardInterrupt:
                         logger.warning("Interrupted.")
                         break
+                    except SafetyStop as exc:
+                        logger.error(f"Safety stop: {exc.signal.message}")
+                        return 3
                     except Exception as exc:
                         failed += 1
                         state.record_recovery(
@@ -726,13 +806,14 @@ def run_all(
     target: ResolvedBrowserTarget,
     *,
     limit: int | None = None,
-    sleep: float = 0.0,
+    sleep: str | float | SleepInterval = "0",
     skip_recover: bool = False,
     logger=None,
 ) -> int:
     logger = logger or setup_logging("run")
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
-    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
+    sleep_interval = _sleep_interval(sleep)
+    _log_sleep_interval(sleep_interval, logger)
     logger.info("Stage 1: collect")
     rc = collect_saved_posts(target, limit=limit, sleep=sleep, assume_yes=True, logger=logger)
     if rc != 0:

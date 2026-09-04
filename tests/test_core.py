@@ -130,3 +130,43 @@ def test_cli_exposes_sleep_flag():
     result = CliRunner().invoke(app, ["run", "--help"])
     assert result.exit_code == 0
     assert "--sleep" in result.stdout
+
+
+def test_sleep_range_parsing():
+    from linkedin_archiver.throttle import parse_sleep
+
+    fixed = parse_sleep("2")
+    ranged = parse_sleep("2-5")
+    assert (fixed.minimum, fixed.maximum) == (2.0, 2.0)
+    assert (ranged.minimum, ranged.maximum) == (2.0, 5.0)
+
+
+def test_safety_signals_fail_closed():
+    from linkedin_archiver.safety import SafetyMonitor, SafetyStop, inspect_url_and_text
+
+    signal = inspect_url_and_text(
+        "https://www.linkedin.com/feed/",
+        "We detected an unusually large number of page views from your account.",
+    )
+    assert signal is not None
+    assert signal.kind == "restriction"
+
+    monitor = SafetyMonitor()
+    monitor.observe_response("https://www.linkedin.com/feed/update/urn:li:activity:1", 429)
+    try:
+        monitor.raise_if_triggered()
+    except SafetyStop as exc:
+        assert exc.signal.kind == "rate_limit"
+    else:
+        raise AssertionError("Expected SafetyStop")
+
+
+def test_cli_exposes_sleep_for_all_stages():
+    from typer.testing import CliRunner
+    from linkedin_archiver.cli import app
+
+    runner = CliRunner()
+    for command in ("collect", "archive", "recover", "run"):
+        result = runner.invoke(app, [command, "--help"])
+        assert result.exit_code == 0
+        assert "--sleep" in result.stdout

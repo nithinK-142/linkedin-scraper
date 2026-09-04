@@ -93,10 +93,19 @@ def _log_target(target: ResolvedBrowserTarget, logger) -> None:
     )
 
 
+def _limit_items(items: list, limit: int | None) -> list:
+    if limit is None:
+        return items
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    return items[:limit]
+
+
 def collect_saved_posts(
     target: ResolvedBrowserTarget,
     *,
     output: Path | None = None,
+    limit: int | None = None,
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -104,6 +113,7 @@ def collect_saved_posts(
     runtime_config = cfg.load_config_file()
     output = output or default_saved_posts_file()
     logger.info(f"Output file: {output}")
+    logger.info(f"Limit: {limit if limit is not None else 'all'}")
     _log_target(target, logger)
 
     cdp_url = _ensure_session(
@@ -174,11 +184,15 @@ def collect_saved_posts(
 
             for iteration in range(cfg.MAX_SCROLL_ITERATIONS):
                 before = len(urls)
+                if limit is not None and len(urls) >= limit:
+                    break
                 add_urls(_collect_dom_urls(page))
                 _click_show_more(page)
                 page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 0.60));")
                 page.wait_for_timeout(cfg.SCROLL_SETTLE_TIMEOUT_MS)
                 add_urls(_collect_dom_urls(page))
+                if limit is not None and len(urls) >= limit:
+                    break
 
                 scroll_y = page.evaluate("window.scrollY")
                 scroll_height = page.evaluate("document.documentElement.scrollHeight")
@@ -203,6 +217,8 @@ def collect_saved_posts(
         except Exception as exc:
             logger.warning(f"Browser/session stopped: {exc}")
         finally:
+            if limit is not None:
+                urls[:] = urls[:limit]
             save_urls()
             logger.info(f"Collected: {len(urls)} unique post URLs")
             logger.info(f"Saved to: {output.resolve()}")
@@ -271,6 +287,7 @@ def archive_posts(
     *,
     input_file: Path | None = None,
     output_dir: Path | None = None,
+    limit: int | None = None,
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -288,7 +305,14 @@ def archive_posts(
         logger.error("Input JSON must contain a list.")
         return 1
 
+    try:
+        urls = _limit_items(urls, limit)
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 1
+
     logger.info(f"Input: {input_file} ({len(urls)} URLs)")
+    logger.info(f"Limit: {limit if limit is not None else 'all'}")
     logger.info(f"Output: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.json"
@@ -560,6 +584,7 @@ def recover_media(
     output_dir: Path | None = None,
     archive_root: Path | None = None,
     playback_timeout: int | None = None,
+    limit: int | None = None,
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -577,8 +602,15 @@ def recover_media(
             input_file = failed_file
 
     direct_urls = _load_urls(input_file, urls, logger)
+    try:
+        direct_urls = _limit_items(direct_urls, limit)
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 1
     if not direct_urls:
         return 0
+
+    logger.info(f"Limit: {limit if limit is not None else 'all'}")
 
     missing_tools = vc.check_ffmpeg_tools_available()
     if missing_tools:
@@ -686,18 +718,20 @@ def recover_media(
 def run_all(
     target: ResolvedBrowserTarget,
     *,
+    limit: int | None = None,
     skip_recover: bool = False,
     logger=None,
 ) -> int:
     logger = logger or setup_logging("run")
+    logger.info(f"Limit: {limit if limit is not None else 'all'}")
     logger.info("Stage 1: collect")
-    rc = collect_saved_posts(target, assume_yes=True, logger=logger)
+    rc = collect_saved_posts(target, limit=limit, assume_yes=True, logger=logger)
     if rc != 0:
         logger.error("Collect failed. Stopping.")
         return rc
 
     logger.info("Stage 2: archive")
-    archive_rc = archive_posts(target, assume_yes=True, logger=logger)
+    archive_rc = archive_posts(target, limit=limit, assume_yes=True, logger=logger)
     if archive_rc not in (0, 2):
         logger.error("Archive failed. Stopping.")
         return archive_rc
@@ -708,7 +742,9 @@ def run_all(
 
     _write_failed_posts_file(archive_dir(), default_failed_posts_file(), logger)
     logger.info("Stage 3: recover media")
-    recover_rc = recover_media(target, input_file=default_failed_posts_file(), assume_yes=True, logger=logger)
+    recover_rc = recover_media(
+        target, input_file=default_failed_posts_file(), limit=limit, assume_yes=True, logger=logger
+    )
     if recover_rc not in (0, 2):
         return recover_rc
     return 0 if archive_rc == 0 and recover_rc == 0 else 2

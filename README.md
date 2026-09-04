@@ -38,10 +38,11 @@ List browser profiles:
 uv run linkedin-scraper profiles
 ```
 
-Run the full pipeline:
+Run the full pipeline. Without `--limit`, it processes all saved posts:
 
 ```bash
 uv run linkedin-scraper run
+uv run linkedin-scraper run --limit 50
 ```
 
 Stages:
@@ -51,6 +52,8 @@ uv run linkedin-scraper collect
 uv run linkedin-scraper archive
 uv run linkedin-scraper recover
 ```
+
+`--limit N` (also `--number N` or `-n N`) limits how many posts each command processes. Without it, all available posts are processed.
 
 Each stage works on its own. `run` passes the same browser/profile through all stages and runs:
 

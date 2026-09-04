@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, fields
 from pathlib import Path
 
 # ---------------------------------------------------------------- paths ---
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    """Find the local project root without depending on the current directory."""
+    configured = os.environ.get("LINKEDIN_ARCHIVER_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    current = Path(__file__).resolve()
+    for candidate in current.parents:
+        if (candidate / "pyproject.toml").exists() and (candidate / "src" / "linkedin_archiver").exists():
+            return candidate
+    return Path.cwd()
 
 
 def data_dir() -> Path:

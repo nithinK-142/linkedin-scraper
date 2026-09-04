@@ -1,1 +1,3 @@
-"""Shared library code for the LinkedIn saved-posts archiver."""
+"""LinkedIn saved-post archiver."""
+
+__version__ = "1.0.0"

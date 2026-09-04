@@ -12,5 +12,5 @@ RUN pip install --no-cache-dir .
 
 VOLUME ["/app/data", "/app/archive", "/app/logs"]
 
-ENTRYPOINT ["linkedin-archiver"]
+ENTRYPOINT ["linkedin-scraper"]
 CMD ["archive"]

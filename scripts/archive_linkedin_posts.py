@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Legacy wrapper for: linkedin-archiver archive."""
+"""Legacy wrapper for: linkedin-scraper archive."""
 from __future__ import annotations
 import sys
 from pathlib import Path

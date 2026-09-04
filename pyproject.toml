@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "linkedin-archiver"
+name = "linkedin-scraper"
 version = "1.0.0"
-description = "CLI archiver for LinkedIn saved posts using an authenticated Chromium profile"
+description = "CLI scraper for LinkedIn saved posts using an authenticated Chromium profile"
 requires-python = ">=3.10"
 dependencies = [
   "playwright>=1.45,<2",
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-linkedin-archiver = "linkedin_archiver.cli:main"
+linkedin-scraper = "linkedin_archiver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

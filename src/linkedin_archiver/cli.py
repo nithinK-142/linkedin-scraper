@@ -132,7 +132,7 @@ def status():
 
 
 def main(argv: list[str] | None = None) -> None:
-    app(args=argv, prog_name="linkedin-archiver")
+    app(args=argv, prog_name="linkedin-scraper")
 
 
 if __name__ == "__main__":

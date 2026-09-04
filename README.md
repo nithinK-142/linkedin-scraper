@@ -1,6 +1,6 @@
-# LinkedIn Saved Posts Archiver
+# LinkedIn Scraper
 
-Archives LinkedIn saved posts with a real, already-logged-in Chromium profile over CDP.
+Scrapes and archives LinkedIn saved posts with a real, already-logged-in Chromium profile over CDP.
 
 It saves:
 - post text and metadata
@@ -35,21 +35,21 @@ The project does not use Playwright's bundled browser. It attaches to your real 
 List browser profiles:
 
 ```bash
-uv run linkedin-archiver profiles
+uv run linkedin-scraper profiles
 ```
 
 Run the full pipeline:
 
 ```bash
-uv run linkedin-archiver run
+uv run linkedin-scraper run
 ```
 
 Stages:
 
 ```bash
-uv run linkedin-archiver collect
-uv run linkedin-archiver archive
-uv run linkedin-archiver recover
+uv run linkedin-scraper collect
+uv run linkedin-scraper archive
+uv run linkedin-scraper recover
 ```
 
 Each stage works on its own. `run` passes the same browser/profile through all stages and runs:
@@ -71,8 +71,8 @@ Browser/profile flags are available on every browser command:
 Examples:
 
 ```bash
-uv run linkedin-archiver run --browser brave --profile "Profile 4"
-uv run linkedin-archiver recover --url "https://www.linkedin.com/feed/update/urn:li:activity:1234567890"
+uv run linkedin-scraper run --browser brave --profile "Profile 4"
+uv run linkedin-scraper recover --url "https://www.linkedin.com/feed/update/urn:li:activity:1234567890"
 ```
 
 ## Recovery
@@ -107,7 +107,7 @@ With `--output`, recovery can use a separate output root. The default is the nor
 Stages save progress continuously.
 
 ```bash
-uv run linkedin-archiver status
+uv run linkedin-scraper status
 ```
 
 Re-running skips completed work and retries unresolved posts.

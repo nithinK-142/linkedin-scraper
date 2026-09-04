@@ -297,7 +297,46 @@ project never handles credentials at all.
   verification before claiming success, and ffprobe validation of the
   final file.
 
-## 19. Unavoidable limitations
+## 19. Running in a container (optional)
+
+A `Dockerfile` is included, but only for the Python/Playwright/ffmpeg side —
+**the browser itself is not containerized.** The whole design depends on
+reusing an already-authenticated browser session, and a container can't see
+your host's logged-in browser window by default. So the pattern is: browser
+stays on the host (already logged into LinkedIn), container attaches to it
+over CDP, exactly like running the scripts locally.
+
+This only works cleanly on Linux, where `--network host` gives the
+container the same `127.0.0.1` as the host. On macOS/Windows, Docker
+Desktop's networking doesn't expose host loopback ports the same way, so
+this setup isn't recommended there — run natively instead (Section 4).
+
+```bash
+docker build -t linkedin-archiver .
+
+docker run --rm -it \
+    --network host \
+    -v "$HOME/.config/BraveSoftware:/root/.config/BraveSoftware:ro" \
+    -v "$(pwd)/data:/app/data" \
+    -v "$(pwd)/archive:/app/archive" \
+    -v "$(pwd)/logs:/app/logs" \
+    linkedin-archiver \
+    --input data/linkedin_saved_posts.json --profile "Profile 4"
+```
+
+Notes:
+- The browser's `user-data-dir` is mounted **read-only** — the container
+  only ever reads `Local State` from it to resolve the profile name; it
+  never launches or writes to the real browser profile.
+- Have the browser already running with `--remote-debugging-port=9222`
+  before starting the container (or run `scripts/linkedin_saved.py`
+  natively once first — it will launch it for you). The container's CDP
+  safety checks behave the same either way: it will refuse to guess if it
+  can't find a usable endpoint.
+- Swap the `ENTRYPOINT` script by overriding it, e.g.
+  `docker run ... --entrypoint python linkedin-archiver scripts/linkedin_saved.py ...`.
+
+## 20. Unavoidable limitations
 
 - There is no fully generic way to verify a running browser process is
   showing the exact profile you asked for — the CDP `/json/version`

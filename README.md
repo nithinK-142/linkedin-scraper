@@ -117,20 +117,6 @@ uv run linkedin-scraper status
 
 Re-running skips completed work. Downloads use `.part` files, resume HTTP ranges when supported, retry transient failures, and store SHA-256 hashes.
 
-## Legacy scripts
-
-The old script names still work:
-
-```bash
-python scripts/linkedin_saved.py
-python scripts/archive_linkedin_posts.py
-python scripts/linkedin_video_capture.py
-python scripts/run_pipeline.py
-python scripts/get_profiles.py
-```
-
-They now call the same CLI code.
-
 ## Safety
 
 The selected browser profile is never reset, copied, or overwritten. The project does not store LinkedIn credentials, cookies, or session tokens.

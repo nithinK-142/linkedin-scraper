@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable
@@ -107,6 +108,7 @@ def collect_saved_posts(
     *,
     output: Path | None = None,
     limit: int | None = None,
+    sleep: float = 0.0,
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -115,6 +117,7 @@ def collect_saved_posts(
     output = output or default_saved_posts_file()
     logger.info(f"Output file: {output}")
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
+    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
     _log_target(target, logger)
 
     cdp_url = _ensure_session(
@@ -213,6 +216,9 @@ def collect_saved_posts(
 
                 if unchanged_rounds >= cfg.MAX_UNCHANGED_SCROLL_ROUNDS:
                     break
+                if sleep and iteration < cfg.MAX_SCROLL_ITERATIONS - 1:
+                    logger.info(f"Sleeping {sleep:g}s before next scan")
+                    time.sleep(sleep)
         except KeyboardInterrupt:
             logger.warning("Stopped by user.")
         except Exception as exc:
@@ -289,6 +295,7 @@ def archive_posts(
     input_file: Path | None = None,
     output_dir: Path | None = None,
     limit: int | None = None,
+    sleep: float = 0.0,
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -314,6 +321,7 @@ def archive_posts(
 
     logger.info(f"Input: {input_file} ({len(urls)} URLs)")
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
+    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
     logger.info(f"Output: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     state = StateStore(output_dir)
@@ -332,6 +340,7 @@ def archive_posts(
             context = browser.contexts[0]
             page = find_or_open_page(context, url_hint="linkedin.com")
             skipped = completed = failed = 0
+            page_visits = 0
 
             for index, url in enumerate(urls, start=1):
                 pid = pe.stable_post_id(url)
@@ -339,6 +348,11 @@ def archive_posts(
                     logger.info(f"[{index}/{len(urls)}] SKIP {pid} (already completed)")
                     skipped += 1
                     continue
+
+                if page_visits and sleep:
+                    logger.info(f"Sleeping {sleep:g}s before next post")
+                    time.sleep(sleep)
+                page_visits += 1
 
                 post_dir = output_dir / f"{index:04d}_{pid}"
                 try:
@@ -582,6 +596,7 @@ def recover_media(
     archive_root: Path | None = None,
     playback_timeout: int | None = None,
     limit: int | None = None,
+    sleep: float = 0.0,
     assume_yes: bool = False,
     logger=None,
 ) -> int:
@@ -608,6 +623,7 @@ def recover_media(
         return 0
 
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
+    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
 
     recovery_root = output_dir or archive_root
     recovery_root.mkdir(parents=True, exist_ok=True)
@@ -638,6 +654,7 @@ def recover_media(
             page = await context.new_page()
 
             completed = failed = skipped = 0
+            page_visits = 0
             try:
                 for index, url in enumerate(direct_urls, start=1):
                     activity_id = activity_id_from_url(url)
@@ -650,6 +667,11 @@ def recover_media(
                         logger.info(f"[{index}/{len(direct_urls)}] SKIP {post_id} (already recovered)")
                         skipped += 1
                         continue
+
+                    if page_visits and sleep:
+                        logger.info(f"Sleeping {sleep:g}s before next post")
+                        await asyncio.sleep(sleep)
+                    page_visits += 1
 
                     logger.info(f"[{index}/{len(direct_urls)}] Recovering media: {url}")
                     try:
@@ -704,19 +726,21 @@ def run_all(
     target: ResolvedBrowserTarget,
     *,
     limit: int | None = None,
+    sleep: float = 0.0,
     skip_recover: bool = False,
     logger=None,
 ) -> int:
     logger = logger or setup_logging("run")
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
+    logger.info(f"Sleep: {sleep:g}s" if sleep else "Sleep: disabled")
     logger.info("Stage 1: collect")
-    rc = collect_saved_posts(target, limit=limit, assume_yes=True, logger=logger)
+    rc = collect_saved_posts(target, limit=limit, sleep=sleep, assume_yes=True, logger=logger)
     if rc != 0:
         logger.error("Collect failed. Stopping.")
         return rc
 
     logger.info("Stage 2: archive")
-    archive_rc = archive_posts(target, limit=limit, assume_yes=True, logger=logger)
+    archive_rc = archive_posts(target, limit=limit, sleep=sleep, assume_yes=True, logger=logger)
     if archive_rc not in (0, 2):
         logger.error("Archive failed. Stopping.")
         return archive_rc
@@ -728,7 +752,7 @@ def run_all(
     _write_failed_posts_file(archive_dir(), default_failed_posts_file(), logger)
     logger.info("Stage 3: recover media")
     recover_rc = recover_media(
-        target, input_file=default_failed_posts_file(), limit=limit, assume_yes=True, logger=logger
+        target, input_file=default_failed_posts_file(), limit=limit, sleep=sleep, assume_yes=True, logger=logger
     )
     if recover_rc not in (0, 2):
         return recover_rc

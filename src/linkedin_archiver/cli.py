@@ -62,6 +62,15 @@ def limit_option():
     )
 
 
+def sleep_option():
+    return typer.Option(
+        0.0,
+        "--sleep",
+        min=0.0,
+        help="Seconds to wait between LinkedIn page/post processing. Default: 0.",
+    )
+
+
 @app.command("profiles")
 def profiles(
     browser: Optional[str] = typer.Option(None, "--browser", help="brave, chrome, or chromium."),
@@ -74,6 +83,7 @@ def profiles(
 def collect(
     output: Optional[Path] = typer.Option(None, "--output", "-o", help=f"Output JSON. Default: {default_saved_posts_file()}"),
     limit: Optional[int] = limit_option(),
+    sleep: float = sleep_option(),
     browser: Optional[str] = browser_options()[0],
     browser_path: Optional[str] = browser_options()[1],
     user_data_dir: Optional[str] = browser_options()[2],
@@ -81,7 +91,7 @@ def collect(
     cdp_port: Optional[int] = browser_options()[4],
 ):
     target = _target(browser, browser_path, user_data_dir, profile, cdp_port)
-    raise typer.Exit(stages.collect_saved_posts(target, output=output, limit=limit, logger=setup_logging("collect")))
+    raise typer.Exit(stages.collect_saved_posts(target, output=output, limit=limit, sleep=sleep, logger=setup_logging("collect")))
 
 
 @app.command("archive")
@@ -98,7 +108,7 @@ def archive(
 ):
     del resume
     target = _target(browser, browser_path, user_data_dir, profile, cdp_port)
-    raise typer.Exit(stages.archive_posts(target, input_file=input_file, output_dir=output_dir, limit=limit, logger=setup_logging("archive")))
+    raise typer.Exit(stages.archive_posts(target, input_file=input_file, output_dir=output_dir, limit=limit, sleep=sleep, logger=setup_logging("archive")))
 
 
 @app.command("recover")
@@ -123,6 +133,7 @@ def recover(
             output_dir=output_dir,
             playback_timeout=playback_timeout,
             limit=limit,
+            sleep=sleep,
             logger=setup_logging("recover"),
         )
     )
@@ -132,6 +143,7 @@ def recover(
 def run(
     skip_recover: bool = typer.Option(False, "--skip-recover", "--skip-video-capture", help="Stop after archive."),
     limit: Optional[int] = limit_option(),
+    sleep: float = sleep_option(),
     browser: Optional[str] = browser_options()[0],
     browser_path: Optional[str] = browser_options()[1],
     user_data_dir: Optional[str] = browser_options()[2],
@@ -139,7 +151,7 @@ def run(
     cdp_port: Optional[int] = browser_options()[4],
 ):
     target = _target(browser, browser_path, user_data_dir, profile, cdp_port)
-    raise typer.Exit(stages.run_all(target, limit=limit, skip_recover=skip_recover, logger=setup_logging("run")))
+    raise typer.Exit(stages.run_all(target, limit=limit, sleep=sleep, skip_recover=skip_recover, logger=setup_logging("run")))
 
 
 @app.command("status")

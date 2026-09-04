@@ -55,6 +55,8 @@ uv run linkedin-scraper recover
 
 `--limit N` (also `--number N` or `-n N`) limits how many posts each command processes. Without it, all available posts are processed.
 
+`--sleep N` waits N seconds between LinkedIn page/post operations. Default: disabled.
+
 Each stage works on its own. `run` passes the same browser/profile through all stages and runs:
 
 ```text
@@ -132,5 +134,7 @@ They now call the same CLI code.
 ## Safety
 
 The selected browser profile is never reset, copied, or overwritten. The project does not store LinkedIn credentials, cookies, or session tokens.
+
+LinkedIn warns that automated activity can trigger restrictions, and unusually large numbers of page views in a short period can restrict viewing. `--sleep` reduces request/page frequency but does not guarantee against restrictions.
 
 LinkedIn's DOM and network behavior can change. The collector and recovery logic may need updates when LinkedIn changes.

@@ -121,3 +121,12 @@ def test_retryable_status_codes():
     assert is_retryable_status(502)
     assert not is_retryable_status(404)
     assert not is_retryable_status(403)
+
+
+def test_cli_exposes_sleep_flag():
+    from typer.testing import CliRunner
+    from linkedin_archiver.cli import app
+
+    result = CliRunner().invoke(app, ["run", "--help"])
+    assert result.exit_code == 0
+    assert "--sleep" in result.stdout

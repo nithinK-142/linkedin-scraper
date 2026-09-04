@@ -52,6 +52,7 @@ imgs => imgs.map(img => ({
 """
 
 _LINK_HREFS_JS = "links => links.map(a => a.href).filter(Boolean)"
+_MEDIA_NODES_JS = "nodes => nodes.map(node => node.currentSrc || node.src || node.getAttribute('src') || node.href || node.getAttribute('href') || '').filter(Boolean)"
 
 
 def find_main_post(page, activity_id: str):
@@ -195,9 +196,10 @@ def extract_images(post) -> set[str]:
 def extract_direct_media(post, extensions: tuple[str, ...]) -> set[str]:
     media = set()
     try:
-        for url in post.locator("a[href]").evaluate_all(_LINK_HREFS_JS):
+        urls = post.locator("a[href], video, audio, source, track").evaluate_all(_MEDIA_NODES_JS)
+        for url in urls:
             lower = url.lower()
-            if any(ext in lower for ext in extensions):
+            if any(ext in lower for ext in extensions) and not url.startswith(("blob:", "data:")):
                 media.add(url)
     except Exception:
         pass

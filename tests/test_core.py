@@ -30,3 +30,11 @@ def test_media_capture_unique_path(tmp_path: Path):
     target = tmp_path / "video.mp4"
     target.write_bytes(b"existing")
     assert capture.unique_media_path(target).name == "video-2.mp4"
+
+
+def test_fragmented_video_is_left_for_fmp4_recovery():
+    from linkedin_archiver.media_recovery import _is_fragmented_video
+
+    assert _is_fragmented_video(body=b"xxxxftypxxxxmoovxxxxmdat", content_type="video/mp4") is False
+    assert _is_fragmented_video(body=b"xxxxmoofxxxxmdat", content_type="video/mp4") is True
+    assert _is_fragmented_video(body=b"xxxxmdat", content_type="video/mp4") is True

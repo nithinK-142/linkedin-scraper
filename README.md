@@ -12,7 +12,7 @@ It saves:
 - Python 3.10+
 - Brave, Chrome, or Chromium
 - LinkedIn already logged in to the selected browser profile
-- `ffmpeg` and `ffprobe`
+- `ffmpeg` and `ffprobe` for fragmented-video recovery
 
 ## Setup
 

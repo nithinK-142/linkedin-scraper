@@ -519,8 +519,18 @@ async def _recover_one(
             await tracker.drain()
             vc.write_capture_json(work_dir, url, capture)
 
-            if capture.captures:
-                video_result = vc.reconstruct(work_dir, capture, logger=logger)
+            fragmented = any("moof" in entry.get("boxes", []) for entry in capture.captures)
+            if fragmented:
+                missing_tools = vc.check_ffmpeg_tools_available()
+                if missing_tools:
+                    video_result = {
+                        "status": "ffmpeg_missing",
+                        "missing_tools": missing_tools,
+                    }
+                else:
+                    video_result = vc.reconstruct(work_dir, capture, logger=logger)
+            elif capture.captures:
+                video_result = {"status": "direct_media"}
             else:
                 video_result = {"status": "no_data"}
 
@@ -611,11 +621,6 @@ def recover_media(
         return 0
 
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
-
-    missing_tools = vc.check_ffmpeg_tools_available()
-    if missing_tools:
-        logger.error(f"Missing required system tool(s): {', '.join(missing_tools)}")
-        return 1
 
     recovery_root = output_dir or archive_root
     recovery_root.mkdir(parents=True, exist_ok=True)

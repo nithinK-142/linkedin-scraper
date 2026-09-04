@@ -102,8 +102,6 @@ class MediaCapture:
             return
         content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         url = response.url
-        if content_type.startswith("video/"):
-            return
         if not _looks_like_media(url, content_type):
             return
         if url in self._seen_sources:
@@ -115,6 +113,8 @@ class MediaCapture:
         except Exception:
             return
         if len(body) < 256:
+            return
+        if content_type.startswith("video/") and _is_fragmented_video(body=body, content_type=content_type):
             return
 
         async with self._lock:
@@ -132,6 +132,20 @@ class MediaCapture:
         self.add_saved(path, source_url=url, content_type=content_type, media_kind=kind)
         if self.logger:
             self.logger.debug(f"    Saved media: {path.name} {content_type} {len(body)} bytes")
+
+
+def _mp4_boxes(data: bytes) -> set[bytes]:
+    return {tag for tag in (b"ftyp", b"moov", b"moof", b"mdat", b"styp", b"sidx") if tag in data}
+
+
+def _is_fragmented_video(*, body: bytes | None, content_type: str) -> bool:
+    if body is None:
+        return False
+    if not content_type.startswith("video/") and not content_type.startswith("application/mp4"):
+        # Content-Type is unreliable on browser responses; inspect MP4 boxes anyway.
+        pass
+    boxes = _mp4_boxes(body)
+    return b"moof" in boxes or (b"mdat" in boxes and b"ftyp" not in boxes and b"moov" not in boxes)
 
 
 def _looks_like_media(url: str, content_type: str) -> bool:
@@ -166,9 +180,7 @@ async def save_dom_media(context, page, media_dir: Path, referer: str, capture: 
     urls: list[str] = []
     seen: set[str] = set()
     for entry in entries:
-        candidates = []
-        if entry.get("tag") not in {"video", "source"}:
-            candidates.extend((entry.get("src"), entry.get("href"), entry.get("poster")))
+        candidates = [entry.get("src"), entry.get("poster"), entry.get("href")]
         for raw in candidates:
             if raw and raw not in seen and _looks_like_media(raw, ""):
                 seen.add(raw)
@@ -186,6 +198,8 @@ async def save_dom_media(context, page, media_dir: Path, referer: str, capture: 
             body = await response.body()
             await response.dispose()
             if not body or not _looks_like_media(url, content_type):
+                continue
+            if _is_fragmented_video(body=body, content_type=content_type):
                 continue
             digest = hashlib.sha1(url.encode()).hexdigest()[:10]
             path = capture.unique_media_path(media_dir / f"media_{digest}{_extension(url, content_type)}")

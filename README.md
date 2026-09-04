@@ -107,7 +107,7 @@ With `--output`, recovery can use a separate output root. The default is the nor
 
 ## Resume
 
-Stages save progress continuously.
+Progress is stored in `archive/state.sqlite3`. Old `manifest.json` files are imported automatically.
 
 ```bash
 uv run linkedin-scraper status

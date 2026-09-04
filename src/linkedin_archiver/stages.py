@@ -24,6 +24,7 @@ from linkedin_archiver.browser import (
     resolve_browser_target,
 )
 from linkedin_archiver.media_recovery import MediaCapture, save_dom_media
+from linkedin_archiver.state import StateStore
 from linkedin_archiver.linkedin_data import activity_id_from_url, extract_activity_urls_from_text, normalize_url
 from linkedin_archiver.settings import (
     archive_dir,
@@ -315,128 +316,125 @@ def archive_posts(
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
     logger.info(f"Output: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "manifest.json"
-    manifest = mf.load_manifest(manifest_path)
+    state = StateStore(output_dir)
     _log_target(target, logger)
 
     cdp_url = _ensure_session(target, start_url=None, logger=logger, assume_yes=assume_yes)
 
-    with sync_playwright() as p:
-        logger.info(f"Connecting over CDP: {cdp_url}")
-        browser = p.chromium.connect_over_cdp(cdp_url, timeout=60_000)
-        if not browser.contexts:
-            logger.error("No browser context found after connecting.")
-            return 1
+    try:
+        with sync_playwright() as p:
+            logger.info(f"Connecting over CDP: {cdp_url}")
+            browser = p.chromium.connect_over_cdp(cdp_url, timeout=60_000)
+            if not browser.contexts:
+                logger.error("No browser context found after connecting.")
+                return 1
 
-        context = browser.contexts[0]
-        page = find_or_open_page(context, url_hint="linkedin.com")
-        skipped = completed = failed = 0
+            context = browser.contexts[0]
+            page = find_or_open_page(context, url_hint="linkedin.com")
+            skipped = completed = failed = 0
 
-        for index, url in enumerate(urls, start=1):
-            pid = pe.stable_post_id(url)
-            if mf.is_done(manifest, pid):
-                logger.info(f"[{index}/{len(urls)}] SKIP {pid} (already completed)")
-                skipped += 1
-                continue
+            for index, url in enumerate(urls, start=1):
+                pid = pe.stable_post_id(url)
+                if state.is_post_done(pid):
+                    logger.info(f"[{index}/{len(urls)}] SKIP {pid} (already completed)")
+                    skipped += 1
+                    continue
 
-            post_dir = output_dir / f"{index:04d}_{pid}"
-            try:
-                logger.info(f"[{index}/{len(urls)}] {url}")
-                page.goto(url, wait_until="domcontentloaded", timeout=runtime_config.page_nav_timeout_ms)
-                page.wait_for_timeout(cfg.POST_SETTLE_TIMEOUT_MS)
+                post_dir = output_dir / f"{index:04d}_{pid}"
+                try:
+                    logger.info(f"[{index}/{len(urls)}] {url}")
+                    page.goto(url, wait_until="domcontentloaded", timeout=runtime_config.page_nav_timeout_ms)
+                    page.wait_for_timeout(cfg.POST_SETTLE_TIMEOUT_MS)
 
-                if "login" in page.url.lower():
-                    raise RuntimeError("LinkedIn session expired (redirected to login).")
+                    if "login" in page.url.lower():
+                        raise RuntimeError("LinkedIn session expired (redirected to login).")
 
-                activity_id = activity_id_from_url(url)
-                if not activity_id:
-                    raise RuntimeError("Could not extract activity ID from URL.")
+                    activity_id = activity_id_from_url(url)
+                    if not activity_id:
+                        raise RuntimeError("Could not extract activity ID from URL.")
 
-                post = pe.find_main_post(page, activity_id)
-                if post is None:
-                    mf.record(
-                        manifest,
+                    post = pe.find_main_post(page, activity_id)
+                    if post is None:
+                        state.record_post(
+                            pid,
+                            index=index,
+                            url=url,
+                            status=mf.Status.EXTRACTION_FAILED,
+                            error=f"Main post element not found for activity {activity_id}.",
+                        )
+                        logger.warning(f"  EXTRACTION_FAILED: main post not found for {activity_id}")
+                        failed += 1
+                        continue
+
+                    try:
+                        page.evaluate('el => el.scrollIntoView({block: "center"})', post)
+                    except Exception:
+                        pass
+
+                    pe.expand_see_more(post, page)
+                    text = pe.extract_post_text(post)
+                    author, username, profile_url = pe.extract_author(post)
+                    timestamp = pe.extract_timestamp(post)
+
+                    media_urls = pe.extract_images(post)
+                    media_urls.update(pe.extract_direct_media(post, cfg.MEDIA_LINK_EXTENSIONS))
+                    media = pe.download_media(context, media_urls, post_dir / "media", url)
+
+                    data = {
+                        "url": url,
+                        "activity_id": activity_id,
+                        "author": author,
+                        "username": username,
+                        "profile_url": profile_url,
+                        "timestamp": timestamp,
+                        "text": text,
+                        "media": media,
+                    }
+                    save_post(post_dir, data)
+
+                    status = mf.Status.COMPLETED if len(media) == len(media_urls) else mf.Status.MEDIA_FAILED
+                    state.record_post(
                         pid,
                         index=index,
                         url=url,
-                        status=mf.Status.EXTRACTION_FAILED,
-                        error=f"Main post element not found for activity {activity_id}.",
+                        status=status,
+                        author=author,
+                        username=username,
+                        media_count=len(media),
+                        timestamp=timestamp,
+                        error=None if status == mf.Status.COMPLETED else f"Downloaded {len(media)}/{len(media_urls)} media items.",
                     )
-                    mf.save_manifest(manifest_path, manifest)
-                    logger.warning(f"  EXTRACTION_FAILED: main post not found for {activity_id}")
-                    failed += 1
-                    continue
 
-                try:
-                    page.evaluate('el => el.scrollIntoView({block: "center"})', post)
-                except Exception:
-                    pass
+                    logger.info(
+                        f"  saved author={author!r} media={len(media)}/{len(media_urls)} status={status}"
+                    )
+                    if status == mf.Status.COMPLETED:
+                        completed += 1
+                    else:
+                        failed += 1
 
-                pe.expand_see_more(post, page)
-                text = pe.extract_post_text(post)
-                author, username, profile_url = pe.extract_author(post)
-                timestamp = pe.extract_timestamp(post)
-
-                media_urls = pe.extract_images(post)
-                media_urls.update(pe.extract_direct_media(post, cfg.MEDIA_LINK_EXTENSIONS))
-                media = pe.download_media(context, media_urls, post_dir / "media", url)
-
-                data = {
-                    "url": url,
-                    "activity_id": activity_id,
-                    "author": author,
-                    "username": username,
-                    "profile_url": profile_url,
-                    "timestamp": timestamp,
-                    "text": text,
-                    "media": media,
-                }
-                save_post(post_dir, data)
-
-                status = mf.Status.COMPLETED if len(media) == len(media_urls) else mf.Status.MEDIA_FAILED
-                mf.record(
-                    manifest,
-                    pid,
-                    index=index,
-                    url=url,
-                    status=status,
-                    author=author,
-                    username=username,
-                    media_count=len(media),
-                    timestamp=timestamp,
-                    error=None if status == mf.Status.COMPLETED else f"Downloaded {len(media)}/{len(media_urls)} media items.",
-                )
-                mf.save_manifest(manifest_path, manifest)
-
-                logger.info(
-                    f"  saved author={author!r} media={len(media)}/{len(media_urls)} status={status}"
-                )
-                if status == mf.Status.COMPLETED:
-                    completed += 1
-                else:
+                except KeyboardInterrupt:
+                    logger.warning("Stopped by user.")
+                    break
+                except Exception as exc:
+                    current_url = ""
+                    try:
+                        current_url = page.url
+                    except Exception:
+                        pass
+                    status = mf.Status.LOGIN_REQUIRED if "login" in current_url.lower() else mf.Status.FAILED
+                    state.record_post(pid, index=index, url=url, status=status, error=str(exc))
+                    logger.warning(f"  {status.upper()}: {exc}")
                     failed += 1
 
-            except KeyboardInterrupt:
-                logger.warning("Stopped by user.")
-                break
-            except Exception as exc:
-                current_url = ""
-                try:
-                    current_url = page.url
-                except Exception:
-                    pass
-                status = mf.Status.LOGIN_REQUIRED if "login" in current_url.lower() else mf.Status.FAILED
-                mf.record(manifest, pid, index=index, url=url, status=status, error=str(exc))
-                mf.save_manifest(manifest_path, manifest)
-                logger.warning(f"  {status.upper()}: {exc}")
-                failed += 1
+            state.sync_legacy_snapshots()
+            logger.info(f"Done. completed={completed} skipped={skipped} failed={failed}")
+            logger.info(f"Archive: {output_dir.resolve()}")
+            logger.info("(Browser was left running untouched.)")
 
-        mf.save_manifest(manifest_path, manifest)
-        logger.info(f"Done. completed={completed} skipped={skipped} failed={failed}")
-        logger.info(f"Archive: {output_dir.resolve()}")
-        logger.info("(Browser was left running untouched.)")
-
-    return 0 if failed == 0 else 2
+        return 0 if failed == 0 else 2
+    finally:
+        state.close()
 
 
 def _load_urls(value: Path | None, direct_urls: tuple[str, ...], logger) -> list[str]:
@@ -562,23 +560,12 @@ async def _recover_one(
         await media_capture.drain()
 
 
-def _recovery_targets_from_manifest(archive_root: Path) -> list[tuple[int, str, str]]:
-    manifest_path = archive_root / "manifest.json"
-    if not manifest_path.exists():
-        return []
-    manifest = mf.load_manifest(manifest_path)
-    rows: list[tuple[int, str, str]] = []
-    for post_id, entry in manifest.items():
-        if not entry.get("url") or entry.get("status") == mf.Status.COMPLETED:
-            continue
-        index = int(entry.get("index") or 0)
-        rows.append((index, post_id, entry["url"]))
-    rows.sort(key=lambda item: (item[0], item[1]))
-    return rows
-
+def _recovery_targets(state: StateStore) -> list[tuple[int, str, str]]:
+    return state.unresolved_posts()
 
 def _write_failed_posts_file(archive_root: Path, output_path: Path, logger) -> int:
-    rows = _recovery_targets_from_manifest(archive_root)
+    with StateStore(archive_root) as state:
+        rows = _recovery_targets(state)
     urls = [url for _, _, url in rows]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(urls, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -625,11 +612,8 @@ def recover_media(
     recovery_root = output_dir or archive_root
     recovery_root.mkdir(parents=True, exist_ok=True)
 
-    target_rows = {url: (index, post_id) for index, post_id, url in _recovery_targets_from_manifest(archive_root)}
-    manifest_path = archive_root / "manifest.json"
-    archive_manifest = mf.load_manifest(manifest_path)
-    recovery_manifest_path = archive_root / "recovery_manifest.json"
-    recovery_manifest = mf.load_manifest(recovery_manifest_path)
+    state = StateStore(archive_root)
+    target_rows = {url: (index, post_id) for index, post_id, url in _recovery_targets(state)}
     _log_target(target, logger)
 
     cdp_url = _ensure_session(
@@ -661,7 +645,7 @@ def recover_media(
                     archive_index = (target_rows.get(url) or (index, post_id))[0]
                     post_dir = archive_root / f"{archive_index:04d}_{post_id}" if output_dir is None else recovery_root / post_id
 
-                    rec = recovery_manifest.get(post_id)
+                    rec = state.get_recovery(post_id)
                     if rec and rec.get("status") == "completed" and (post_dir / "media").exists():
                         logger.info(f"[{index}/{len(direct_urls)}] SKIP {post_id} (already recovered)")
                         skipped += 1
@@ -672,23 +656,18 @@ def recover_media(
                         result = await _recover_one(
                             context, page, post_dir, url, playback_timeout, logger
                         )
-                        recovery_manifest[post_id] = {
-                            "index": archive_index,
-                            "url": url,
-                            "status": result["status"],
-                            "media_count": result["media_count"],
-                            "video": result["video"],
-                        }
-                        recovery_manifest_path.write_text(
-                            json.dumps(recovery_manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+                        state.record_recovery(
+                            post_id,
+                            index=archive_index,
+                            url=url,
+                            status=result["status"],
+                            media_count=result["media_count"],
+                            video=result["video"],
                         )
 
                         if result["status"] == "completed":
                             completed += 1
-                            archive_entry = archive_manifest.get(post_id)
-                            if archive_entry:
-                                archive_entry["media_recovered"] = result["media_count"]
-                                mf.save_manifest(manifest_path, archive_manifest)
+                            state.update_media_recovered(post_id, result["media_count"])
                         else:
                             failed += 1
                         logger.info(f"  recovered media={result['media_count']} status={result['status']}")
@@ -697,14 +676,12 @@ def recover_media(
                         break
                     except Exception as exc:
                         failed += 1
-                        recovery_manifest[post_id] = {
-                            "index": archive_index,
-                            "url": url,
-                            "status": "failed",
-                            "error": str(exc),
-                        }
-                        recovery_manifest_path.write_text(
-                            json.dumps(recovery_manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+                        state.record_recovery(
+                            post_id,
+                            index=archive_index,
+                            url=url,
+                            status="failed",
+                            error=str(exc),
                         )
                         logger.warning(f"  FAILED: {exc}")
             finally:
@@ -717,7 +694,10 @@ def recover_media(
             logger.info("(Browser was left running untouched.)")
             return 0 if failed == 0 else 2
 
-    return asyncio.run(run())
+    try:
+        return asyncio.run(run())
+    finally:
+        state.close()
 
 
 def run_all(
@@ -789,17 +769,12 @@ def list_profiles(*, browser: str | None = None, user_data_dir: str | None = Non
 
 
 def show_status() -> int:
-    archive_root = archive_dir()
-    manifest = mf.load_manifest(archive_root / "manifest.json")
-    recovery = mf.load_manifest(archive_root / "recovery_manifest.json")
-    counts: dict[str, int] = {}
-    for entry in manifest.values():
-        status = entry.get("status", "unknown")
-        counts[status] = counts.get(status, 0) + 1
-    print(f"Posts: {len(manifest)}")
-    for status in sorted(counts):
-        print(f"  {status}: {counts[status]}")
-    if recovery:
-        recovered = sum(1 for item in recovery.values() if item.get("status") == "completed")
-        print(f"Media recovered: {recovered}")
+    with StateStore(archive_dir()) as state:
+        counts = state.post_counts()
+        print(f"Posts: {sum(counts.values())}")
+        for status in sorted(counts):
+            print(f"  {status}: {counts[status]}")
+        recovered = state.recovered_count()
+        if recovered:
+            print(f"Media recovered: {recovered}")
     return 0

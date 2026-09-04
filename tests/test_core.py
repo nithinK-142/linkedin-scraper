@@ -38,3 +38,41 @@ def test_fragmented_video_is_left_for_fmp4_recovery():
     assert _is_fragmented_video(body=b"xxxxftypxxxxmoovxxxxmdat", content_type="video/mp4") is False
     assert _is_fragmented_video(body=b"xxxxmoofxxxxmdat", content_type="video/mp4") is True
     assert _is_fragmented_video(body=b"xxxxmdat", content_type="video/mp4") is True
+
+
+def test_state_store_persists_post_and_recovers_after_reopen(tmp_path: Path):
+    from linkedin_archiver.state import StateStore
+
+    root = tmp_path / "archive"
+    with StateStore(root) as state:
+        state.record_post("123", index=1, url="https://www.linkedin.com/feed/update/urn:li:activity:123", status="completed", media_count=2)
+        assert state.is_post_done("123")
+
+    with StateStore(root) as state:
+        row = state.get_post("123")
+        assert row["media_count"] == 2
+        assert state.post_counts() == {"completed": 1}
+        state.record_recovery("123", index=1, url=row["url"], status="completed", media_count=2, video={"status": "direct_media"})
+
+    with StateStore(root) as state:
+        recovery = state.get_recovery("123")
+        assert recovery["video"]["status"] == "direct_media"
+
+
+def test_state_store_migrates_legacy_manifests(tmp_path: Path):
+    from linkedin_archiver.state import StateStore
+
+    root = tmp_path / "archive"
+    root.mkdir()
+    (root / "manifest.json").write_text(
+        '{"123":{"index":1,"url":"https://www.linkedin.com/feed/update/urn:li:activity:123","status":"media_failed","media_count":1}}',
+        encoding="utf-8",
+    )
+    (root / "recovery_manifest.json").write_text(
+        '{"123":{"index":1,"url":"https://www.linkedin.com/feed/update/urn:li:activity:123","status":"completed","media_count":2,"video":{"status":"direct_media"}}}',
+        encoding="utf-8",
+    )
+
+    with StateStore(root) as state:
+        assert state.get_post("123")["status"] == "media_failed"
+        assert state.get_recovery("123")["media_count"] == 2

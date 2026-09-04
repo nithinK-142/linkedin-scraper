@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+logs/
+*.log
+
+# Generated data / archives / media (personal LinkedIn content, not source)
+data/*.json
+archive/
+!archive/.gitkeep
+
+# Local, non-secret config overrides
+config.json
+
+# OS / editor cruft
+.DS_Store
+*.swp

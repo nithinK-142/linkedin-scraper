@@ -61,8 +61,8 @@ def _candidate_matches_activity(element, activity_id: str) -> bool:
 
     try:
         return element.locator(
-            f'a[href*="urn:li:activity:{activity_id}"], '
-            f'a[href*="/feed/update/urn:li:activity:{activity_id}"]'
+            f'a[href*="{activity_id}"], '
+            f'[data-urn*="{activity_id}"], [data-id*="{activity_id}"]'
         ).count() > 0
     except Exception:
         return False
@@ -76,7 +76,9 @@ def _root_score(element, activity_id: str, *, dedicated_post_page: bool) -> int:
         data_urn = element.get_attribute("data-urn") or ""
         data_id = element.get_attribute("data-id") or ""
         if tag == "ARTICLE":
-            score += 15
+            score += 25
+        if (element.get_attribute("role") or "").lower() == "article":
+            score += 25
         if "feed-shared-update-v2" in classes:
             score += 50
         if "occludable-update" in classes:
@@ -84,101 +86,141 @@ def _root_score(element, activity_id: str, *, dedicated_post_page: bool) -> int:
         if "update-components-update-v2" in classes:
             score += 25
         if activity_id in data_urn or activity_id in data_id:
-            score += 40
+            score += 50
         if _candidate_matches_activity(element, activity_id):
-            score += 30
+            score += 35
         if "comment" in classes or "reply" in classes:
-            score -= 60
+            score -= 80
         if element.locator('[data-testid="expandable-text-box"], div.update-components-text, div.feed-shared-text').count():
-            score += 10
+            score += 12
         if element.locator('a[href*="/in/"], a[href*="/company/"]').count():
             score += 10
-        if dedicated_post_page and "feed-shared-update-v2" in classes:
-            score += 20
+        try:
+            text_len = len(element.inner_text())
+            if 50 <= text_len <= 20_000:
+                score += 8
+            elif text_len > 60_000:
+                score -= 50
+        except Exception:
+            pass
+        if dedicated_post_page and (tag == "ARTICLE" or (element.get_attribute("role") or "").lower() == "article"):
+            score += 10
     except Exception:
         return score
     return score
 
 
+def _ancestor_candidates(element):
+    selectors = (
+        'xpath=ancestor::*[@data-urn and contains(@data-urn, "urn:li:activity:")][1]',
+        'xpath=ancestor::*[@data-id and contains(@data-id, "urn:li:activity:")][1]',
+        "xpath=ancestor::article[1]",
+        "xpath=ancestor::*[@role='article'][1]",
+        'xpath=ancestor::*[@data-finite-scroll-hotkey-item][1]',
+        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " feed-shared-update-v2 ")][1]',
+        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " occludable-update ")][1]',
+        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " update-components-update-v2 ")][1]',
+    )
+    for selector in selectors:
+        try:
+            ancestor = element.locator(selector)
+            if ancestor.count():
+                yield ancestor.first
+        except Exception:
+            continue
+
+
 def find_main_post(page, activity_id: str):
     """Locate the actual post root for an activity ID.
 
-    LinkedIn changes its DOM frequently. Prefer activity-ID evidence, then
-    fall back to stable post-container selectors on a dedicated post page.
-    Never use ``article.first`` by itself because that can select a comment.
+    LinkedIn changes its DOM frequently. Prefer direct activity-ID/permalink
+    evidence, then choose the smallest plausible post container around that
+    evidence. Never fall back to the whole page or an arbitrary first article.
     """
-    candidates = []
-    dedicated_post_page = f"/feed/update/urn:li:activity:{activity_id}" in page.url
+    dedicated_post_page = activity_id in page.url
+    direct_matches = []
 
-    # Wait for some post container to exist. The old fixed sleep was not enough
-    # when LinkedIn rendered the post asynchronously.
+    def collect_direct_matches() -> None:
+        selectors = (
+            f'[data-urn*="urn:li:activity:{activity_id}"]',
+            f'[data-id*="urn:li:activity:{activity_id}"]',
+            f'[data-urn*="{activity_id}"]',
+            f'[data-id*="{activity_id}"]',
+            f'a[href*="urn:li:activity:{activity_id}"]',
+            f'a[href*="{activity_id}"]',
+        )
+        for selector in selectors:
+            try:
+                direct_matches.extend(page.locator(selector).all())
+            except Exception:
+                continue
+
+    # Let LinkedIn hydrate the dedicated post before selecting broad fallbacks.
     try:
         page.wait_for_selector(
-            'article, .feed-shared-update-v2, .occludable-update, [data-finite-scroll-hotkey-item]',
-            state="visible",
-            timeout=10_000,
+            'article, [role="article"], [data-id], [data-urn], a[href]',
+            state="attached",
+            timeout=5_000,
         )
     except Exception:
         pass
 
-    direct_selectors = (
-        f'[data-urn*="urn:li:activity:{activity_id}"]',
-        f'[data-id*="urn:li:activity:{activity_id}"]',
-        f'a[href*="urn:li:activity:{activity_id}"]',
-    )
-    for selector in direct_selectors:
+    collect_direct_matches()
+    if not direct_matches:
         try:
-            elements = page.locator(selector).all()
+            page.wait_for_function(
+                "activityId => Array.from(document.querySelectorAll('a[href], [data-id], [data-urn]')).some(el => ((el.getAttribute('href') || '') + ' ' + (el.getAttribute('data-id') || '') + ' ' + (el.getAttribute('data-urn') || '')).includes(activityId))",
+                activity_id,
+                timeout=12_000,
+            )
         except Exception:
-            elements = []
-        for element in elements:
-            try:
-                if not element.is_visible():
-                    continue
-                root = element
-                if (element.evaluate("el => el.tagName") or "").upper() == "A":
-                    for ancestor_selector in (
-                        "xpath=ancestor::article[1]",
-                        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " feed-shared-update-v2 ")][1]',
-                        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " occludable-update ")][1]',
-                        'xpath=ancestor::*[@data-finite-scroll-hotkey-item][1]',
-                    ):
-                        try:
-                            ancestor = element.locator(ancestor_selector)
-                            if ancestor.count():
-                                root = ancestor.first
-                                break
-                        except Exception:
-                            continue
-                candidates.append(root)
-            except Exception:
-                continue
+            pass
+        collect_direct_matches()
 
-    # If the dedicated page does not expose the activity ID in attributes,
-    # score the actual post containers. This is the critical fallback for the
-    # current single-post page layout.
-    if not candidates:
-        for selector in (
-            '.feed-shared-update-v2',
-            '.occludable-update',
-            '.update-components-update-v2',
-            'article',
-            '[data-finite-scroll-hotkey-item]',
-        ):
+    candidates = []
+    for element in direct_matches:
+        try:
+            if not element.is_visible():
+                continue
+            candidates.append(element)
+            candidates.extend(_ancestor_candidates(element))
+        except Exception:
+            continue
+
+    # Only use broad containers when no direct activity/permalink evidence
+    # exists. This fallback is deliberately strict to avoid treating the feed
+    # shell or a comment as the target post.
+    if not direct_matches:
+        for selector in ('article', '[role="article"]'):
             try:
                 candidates.extend(page.locator(selector).all())
             except Exception:
                 continue
 
-    # De-duplicate equivalent locator targets by DOM identity.
     unique = []
     seen_handles = set()
     for element in candidates:
         try:
-            handle = element.evaluate("el => el")
-            key = str(handle)
+            key = element.evaluate(
+                """el => {
+                    const parts = [];
+                    let current = el;
+                    while (current && current.nodeType === 1) {
+                        let index = 1;
+                        let sibling = current.previousElementSibling;
+                        while (sibling) {
+                            index += 1;
+                            sibling = sibling.previousElementSibling;
+                        }
+                        parts.unshift(current.tagName.toLowerCase() + ":" + index);
+                        current = current.parentElement;
+                    }
+                    return parts.join(">");
+                }"""
+            )
         except Exception:
             key = repr(element)
+        key = str(key)
         if key in seen_handles:
             continue
         seen_handles.add(key)
@@ -190,6 +232,9 @@ def find_main_post(page, activity_id: str):
             if not element.is_visible():
                 continue
             score = _root_score(element, activity_id, dedicated_post_page=dedicated_post_page)
+            # A direct permalink match is stronger than generic container shape.
+            if (element.evaluate("el => el.tagName") or "").upper() == "A":
+                score -= 100
             scored.append((score, element))
         except Exception:
             continue
@@ -199,9 +244,7 @@ def find_main_post(page, activity_id: str):
 
     scored.sort(key=lambda item: item[0], reverse=True)
     best_score, best = scored[0]
-    # A random page container is not good enough. Require strong evidence
-    # unless this is a dedicated post page with a known post container.
-    if best_score < 20:
+    if best_score < 30:
         return None
     return best
 

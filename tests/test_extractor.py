@@ -1,6 +1,53 @@
 from playwright.sync_api import sync_playwright
 
 
+def test_find_main_post_matches_current_feed_detail_markup_without_data_urn():
+    """Regression test grounded in a real captured LinkedIn page: the
+    current 'Update Detail' page has NO data-urn/data-id attributes and NO
+    <article>/role=article elements at all. The post instead renders as
+    role="listitem" with a componentkey containing "FeedType_FEED_DETAIL",
+    while comments use a distinct "replaceableComment_urn:li:comment:(...)"
+    componentkey. Without this marker-based path, find_main_post fell
+    through to a lone, heavily-penalized <a> tag and returned None for a
+    genuine, real post."""
+    from linkedin_archiver.extractor import find_main_post
+
+    activity_id = "7500775585367867392"
+    html = f"""
+    <main>
+      <section aria-label="Primary content">
+        <div role="listitem" componentkey="expandedXYZFeedType_FEED_DETAIL">
+          <h2><span>Feed post</span></h2>
+          <a href="https://www.linkedin.com/in/someone/">Author Name</a>
+          <span data-testid="expandable-text-box">This is the real post text, long enough to matter.</span>
+          <a href="https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}/">Send</a>
+        </div>
+        <div componentkey="replaceableComment_urn:li:comment:(urn:li:activity:{activity_id},999)">
+          <span data-testid="expandable-text-box">This is an unrelated comment, not the post.</span>
+        </div>
+      </section>
+      <aside aria-label="Aside">
+        <footer>
+          <a href="https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}/">More</a>
+        </footer>
+      </aside>
+    </main>
+    """
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, executable_path="/usr/bin/chromium")
+        page = browser.new_page()
+        page.set_content(html)
+        root = find_main_post(page, activity_id)
+        assert root is not None
+        assert (root.get_attribute("componentkey") or "").find("FeedType_FEED_DETAIL") != -1
+        # Must be the post, not the comment or the aside's stray footer link.
+        text = root.inner_text()
+        assert "real post text" in text
+        assert "unrelated comment" not in text
+        browser.close()
+
+
 def test_find_main_post_uses_activity_id_permalink_and_returns_smallest_post_root():
     from linkedin_archiver.extractor import find_main_post
 

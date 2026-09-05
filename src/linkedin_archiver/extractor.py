@@ -130,13 +130,66 @@ def _ancestor_candidates(element):
             continue
 
 
+def _find_post_root_via_feed_detail_marker(page, activity_id: str):
+    """LinkedIn's current single-post "Update Detail" page (identified by
+    ``data-sdui-screen="...UpdateDetail"``) no longer emits any
+    ``data-urn``/``data-id`` attributes or ``<article>``/``role="article"``
+    elements at all — confirmed from a real captured page, not assumed.
+    Every legacy selector this module used to rely on matches nothing on
+    that surface, which is why direct-match scoring was falling through to
+    a lone, heavily-penalized ``<a>`` tag and returning "not found" for
+    genuine posts.
+
+    What IS reliably present: the post itself renders as a
+    ``role="listitem"`` element whose ``componentkey`` contains
+    ``FeedType_FEED_DETAIL``, while each comment underneath uses a
+    different, clearly distinct ``componentkey`` shape
+    (``replaceableComment_urn:li:comment:(...)``). This targets that
+    marker directly, then double-checks it actually contains a permalink
+    to this activity ID and the post's text box, so a future LinkedIn
+    change that reuses similar markup elsewhere can't silently mismatch.
+    """
+    try:
+        page.wait_for_selector(
+            '[role="listitem"][componentkey*="FeedType_FEED_DETAIL"]',
+            state="attached",
+            timeout=8_000,
+        )
+    except Exception:
+        pass
+
+    try:
+        candidates = page.locator('[role="listitem"][componentkey*="FeedType_FEED_DETAIL"]').all()
+    except Exception:
+        return None
+
+    needle = f"urn:li:activity:{activity_id}"
+    for element in candidates:
+        try:
+            if not element.is_visible():
+                continue
+            if element.locator(f'a[href*="{needle}"]').count() == 0:
+                continue
+            if element.locator('[data-testid="expandable-text-box"]').count() == 0:
+                continue
+            return element
+        except Exception:
+            continue
+    return None
+
+
 def find_main_post(page, activity_id: str):
     """Locate the actual post root for an activity ID.
 
-    LinkedIn changes its DOM frequently. Prefer direct activity-ID/permalink
-    evidence, then choose the smallest plausible post container around that
-    evidence. Never fall back to the whole page or an arbitrary first article.
+    LinkedIn changes its DOM frequently. Try the current known-working
+    marker first, then fall back to the older data-urn/data-id/ancestor
+    scoring approach in case an older page shape is served. Never fall
+    back to the whole page or an arbitrary first article.
     """
+    marker_match = _find_post_root_via_feed_detail_marker(page, activity_id)
+    if marker_match is not None:
+        return marker_match
+
     dedicated_post_page = activity_id in page.url
     direct_matches = []
 
@@ -317,6 +370,13 @@ def extract_author(post) -> tuple[str | None, str | None, str | None]:
                 if not href:
                     continue
                 name = link.inner_text().strip()
+                if not name:
+                    continue
+                # The profile link's accessible text can include trailing
+                # connection-degree text concatenated in ("Name • 2nd"),
+                # confirmed against a real captured page. Keep only the
+                # name itself.
+                name = name.split("•")[0].strip()
                 if not name:
                     continue
                 candidates.append((href, " ".join(name.split())))

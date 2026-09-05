@@ -293,3 +293,27 @@ def test_browser_session_close_only_closes_owned_process(monkeypatch):
     owned.close()
     assert process.terminated
     assert not owned.owned
+
+
+def test_logging_mirrors_console_level_to_file(tmp_path: Path):
+    import logging
+
+    from linkedin_archiver.settings import setup_logging
+
+    logger_name = "test-log-mirror"
+    logger = setup_logging(logger_name, log_dir=tmp_path, level=logging.INFO)
+    logger.info("visible")
+    logger.debug("hidden")
+
+    text = (tmp_path / "test-log-mirror.log").read_text(encoding="utf-8")
+    assert "visible" in text
+    assert "hidden" not in text
+
+    logger = setup_logging(logger_name, log_dir=tmp_path, level=logging.DEBUG)
+    logger.debug("visible-debug")
+    text = (tmp_path / "test-log-mirror.log").read_text(encoding="utf-8")
+    assert "visible-debug" in text
+
+    for handler in logger.handlers:
+        handler.close()
+    logger.handlers.clear()

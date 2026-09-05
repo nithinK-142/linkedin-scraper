@@ -5,10 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 import typer
 
 from linkedin_archiver import stages
-from linkedin_archiver.settings import archive_dir, default_saved_posts_file, setup_logging, load_config_file, config_path_value
+from linkedin_archiver.settings import (
+    archive_dir,
+    default_saved_posts_file,
+    setup_logging,
+    load_config_file,
+    config_path_value,
+)
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -70,6 +78,15 @@ def sleep_option():
     )
 
 
+def verbose_option():
+    return typer.Option(False, "--verbose", "-v", help="Show debug logs on the console and in the log file.")
+
+
+def _configure_logger(command: str, verbose: bool, config) -> object:
+    level = logging.DEBUG if (verbose or config.verbose) else logging.INFO
+    return setup_logging(command, level=level)
+
+
 def _runtime_config():
     try:
         return load_config_file()
@@ -86,12 +103,13 @@ def _path(value: Optional[str]):
 def profiles(
     browser: Optional[str] = typer.Option(None, "--browser", help="brave, chrome, or chromium."),
     user_data_dir: Optional[str] = typer.Option(None, "--user-data-dir", help="Browser user-data directory."),
+    verbose: bool = verbose_option(),
 ):
     config = _runtime_config()
     browser = browser if browser is not None else config.browser
     user_data_dir = user_data_dir if user_data_dir is not None else config.user_data_dir
     user_data_dir = str(Path(user_data_dir).expanduser()) if user_data_dir is not None else None
-    raise typer.Exit(stages.list_profiles(browser=browser, user_data_dir=user_data_dir, logger=setup_logging("profiles")))
+    raise typer.Exit(stages.list_profiles(browser=browser, user_data_dir=user_data_dir, logger=_configure_logger("profiles", verbose, config)))
 
 
 @app.command("collect")
@@ -104,6 +122,7 @@ def collect(
     user_data_dir: Optional[str] = browser_options()[2],
     profile: Optional[str] = browser_options()[3],
     cdp_port: Optional[int] = browser_options()[4],
+    verbose: bool = verbose_option(),
 ):
     config = _runtime_config()
     browser_path = str(Path(browser_path).expanduser()) if browser_path is not None else None
@@ -112,7 +131,7 @@ def collect(
     output = output or _path(config.collect_output)
     limit = limit if limit is not None else config.limit
     sleep = sleep if sleep is not None else config.sleep
-    raise typer.Exit(stages.collect_saved_posts(target, output=output, limit=limit, sleep=sleep, logger=setup_logging("collect")))
+    raise typer.Exit(stages.collect_saved_posts(target, output=output, limit=limit, sleep=sleep, logger=_configure_logger("collect", verbose, config)))
 
 
 @app.command("archive")
@@ -127,6 +146,7 @@ def archive(
     user_data_dir: Optional[str] = browser_options()[2],
     profile: Optional[str] = browser_options()[3],
     cdp_port: Optional[int] = browser_options()[4],
+    verbose: bool = verbose_option(),
 ):
     del resume
     config = _runtime_config()
@@ -137,7 +157,7 @@ def archive(
     output_dir = output_dir or _path(config.archive_output)
     limit = limit if limit is not None else config.limit
     sleep = sleep if sleep is not None else config.sleep
-    raise typer.Exit(stages.archive_posts(target, input_file=input_file, output_dir=output_dir, limit=limit, sleep=sleep, logger=setup_logging("archive")))
+    raise typer.Exit(stages.archive_posts(target, input_file=input_file, output_dir=output_dir, limit=limit, sleep=sleep, logger=_configure_logger("archive", verbose, config)))
 
 
 @app.command("recover")
@@ -153,6 +173,7 @@ def recover(
     user_data_dir: Optional[str] = browser_options()[2],
     profile: Optional[str] = browser_options()[3],
     cdp_port: Optional[int] = browser_options()[4],
+    verbose: bool = verbose_option(),
 ):
     config = _runtime_config()
     browser_path = str(Path(browser_path).expanduser()) if browser_path is not None else None
@@ -173,7 +194,7 @@ def recover(
             playback_timeout=playback_timeout,
             limit=limit,
             sleep=sleep,
-            logger=setup_logging("recover"),
+            logger=_configure_logger("recover", verbose, config),
         )
     )
 
@@ -188,6 +209,7 @@ def run(
     user_data_dir: Optional[str] = browser_options()[2],
     profile: Optional[str] = browser_options()[3],
     cdp_port: Optional[int] = browser_options()[4],
+    verbose: bool = verbose_option(),
 ):
     config = _runtime_config()
     browser_path = str(Path(browser_path).expanduser()) if browser_path is not None else None
@@ -196,7 +218,7 @@ def run(
     limit = limit if limit is not None else config.limit
     sleep = sleep if sleep is not None else config.sleep
     skip_recover = skip_recover if skip_recover is not None else config.skip_recover
-    raise typer.Exit(stages.run_all(target, limit=limit, sleep=sleep, skip_recover=skip_recover, logger=setup_logging("run")))
+    raise typer.Exit(stages.run_all(target, limit=limit, sleep=sleep, skip_recover=skip_recover, logger=_configure_logger("run", verbose, config)))
 
 
 @app.command("status")

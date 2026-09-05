@@ -38,10 +38,6 @@ def default_saved_posts_file() -> Path:
     return data_dir() / "linkedin_saved_posts.json"
 
 
-def default_failed_posts_file() -> Path:
-    return data_dir() / "failed_posts.json"
-
-
 def default_video_output_dir() -> Path:
     return archive_dir() / "videos"
 
@@ -61,26 +57,27 @@ def setup_logging(
     script_name: str,
     *,
     log_dir: Path | None = None,
-    console_level: int = logging.INFO,
-    file_level: int = logging.DEBUG,
+    level: int = logging.INFO,
 ) -> logging.Logger:
-    """Console + per-script log file. Never logs cookies/tokens/credentials."""
+    """Mirror CLI logs to stderr and the command log file."""
     logger = logging.getLogger(script_name)
     logger.setLevel(logging.DEBUG)
 
     if logger.handlers:
-        return logger  # already configured
+        for handler in logger.handlers:
+            handler.setLevel(level)
+        return logger
 
     target_dir = ensure_dir(log_dir if log_dir is not None else logs_dir())
     log_file = target_dir / f"{script_name}.log"
     formatter = logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(file_level)
+    file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
 
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(console_level)
+    console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)
@@ -143,6 +140,7 @@ class RuntimeConfig:
     playback_timeout: int = VIDEO_PLAYBACK_TIMEOUT_SECONDS
 
     skip_recover: bool = False
+    verbose: bool = False
 
 
 def config_path_value(value: str | None) -> Path | None:

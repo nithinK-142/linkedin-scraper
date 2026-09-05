@@ -12,6 +12,7 @@
 # Processing
 # limit = 20
 # sleep = "2-4"
+# verbose = true
 
 # Collection
 # saved_posts_url = "https://www.linkedin.com/my-items/saved-posts/"
@@ -26,7 +27,7 @@
 # recover_urls = [
 #   "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/"
 # ]
-# recover_input = "data/failed_posts.json"
+# recover_input = "path/to/urls.json"
 # recover_output = "archive"
 # playback_timeout = 300
 # video_playback_timeout_seconds = 300

@@ -56,12 +56,15 @@ uv run linkedin-scraper recover
 `--limit N` (also `--number N` or `-n N`) limits how many posts each command processes. Without it, all available posts are processed.
 
 `--sleep N` waits N seconds between LinkedIn page/post operations. Default: disabled.
+`--verbose` (or `-v`) shows debug logs and stores the same debug output in the command log.
 
 Each stage works on its own. `run` passes the same browser/profile through all stages and runs:
 
 ```text
 collect → archive → recover
 ```
+
+For `run`, the full pipeline is written to `logs/run.log`. The file mirrors console output unless `--verbose` is enabled.
 
 ## Config
 
@@ -120,6 +123,7 @@ uv run linkedin-scraper status
 ```
 
 Re-running skips completed work. Downloads use `.part` files, resume HTTP ranges when supported, retry transient failures, and store SHA-256 hashes.
+`recover` without `--url` or `--input` reads unresolved posts directly from SQLite. It does not create a separate `failed_posts.json`.
 
 ## Safety
 

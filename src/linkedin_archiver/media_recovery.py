@@ -190,6 +190,43 @@ def _extension(url: str, content_type: str) -> str:
     return mimetypes.guess_extension(content_type) or ".bin"
 
 
+
+def filter_scoped_media_entries(entries: list[dict]) -> list[str]:
+    """Return only media URLs that plausibly belong to the already-isolated post root.
+
+    The caller must pass elements from the target post root, never the whole page.
+    Additional structural filtering removes avatars, action icons, comments and
+    ordinary UI links. URLs are returned in DOM order and deduplicated.
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        tag = (entry.get("tag") or "").lower()
+        raw = entry.get("src") or entry.get("href") or ""
+        if not raw or raw.startswith(("blob:", "data:")) or raw in seen:
+            continue
+        if is_stream_manifest(raw):
+            continue
+        if entry.get("actor") or entry.get("in_comment") or entry.get("interactive"):
+            continue
+        if tag == "img":
+            width = int(entry.get("width") or 0)
+            height = int(entry.get("height") or 0)
+            if not entry.get("attachment") and (width < 200 or height < 150):
+                continue
+        elif tag == "a":
+            if not entry.get("attachment") or not _looks_like_media(raw, ""):
+                continue
+        elif tag == "source":
+            if not entry.get("inside_media") and not entry.get("attachment"):
+                continue
+        elif tag not in {"video", "audio"}:
+            continue
+        seen.add(raw)
+        urls.append(raw)
+    return urls
+
+
 async def save_dom_media(
     context,
     page,
@@ -206,8 +243,13 @@ async def save_dom_media(
     unrelated resources. When a post root is available, only nodes inside
     that post are eligible.
     """
+    # Never broaden this scope to the whole page. A missing/bad post root must
+    # result in zero media, not unrelated page assets.
+    if root is None:
+        return
+
     media_dir.mkdir(parents=True, exist_ok=True)
-    scope = root or page
+    scope = root
     try:
         entries = await scope.locator(
             "img, picture source, video, audio, source, a[href]"
@@ -216,31 +258,19 @@ async def save_dom_media(
                 tag: node.tagName.toLowerCase(),
                 src: node.currentSrc || node.src || node.getAttribute('src') || '',
                 href: node.href || node.getAttribute('href') || '',
-                actor: !!node.closest('[class*=\"update-components-actor\"], [class*=\"feed-shared-actor\"], [class*=\"avatar\"], [aria-label*=\"profile picture\"]'),
-                attachment: !!node.closest('[class*=\"feed-shared-document\"], [class*=\"update-components-document\"], [class*=\"feed-shared-article\"], [class*=\"feed-shared-attachment\"], [class*=\"feed-shared-video\"], [class*=\"feed-shared-image\"], [class*=\"feed-shared-carousel\"]'),
+                width: node.naturalWidth || 0,
+                height: node.naturalHeight || 0,
+                actor: !!node.closest('[class*="update-components-actor"], [class*="feed-shared-actor"], [class*="avatar"], [aria-label*="profile picture"]'),
+                in_comment: !!node.closest('[class*="comment"], [data-comment], [role="comment"]'),
+                interactive: !!node.closest('button, [role="button"]'),
+                attachment: !!node.closest('[class*="feed-shared-document"], [class*="update-components-document"], [class*="feed-shared-article"], [class*="feed-shared-attachment"], [class*="feed-shared-video"], [class*="feed-shared-image"], [class*="feed-shared-carousel"], [data-test-media-container]'),
+                inside_media: !!node.closest('video, audio')
             }))"""
         )
     except Exception:
         entries = []
 
-    urls: list[str] = []
-    seen: set[str] = set()
-    for entry in entries:
-        tag = entry.get("tag")
-        raw = entry.get("src") or entry.get("href")
-        if not raw or raw.startswith(("blob:", "data:")) or raw in seen:
-            continue
-        if is_stream_manifest(raw):
-            continue
-        if tag == "img" and entry.get("actor"):
-            continue
-        if tag == "a" and (not entry.get("attachment") or not _looks_like_media(raw, "")):
-            continue
-        if tag not in {"img", "source", "video", "audio", "a"}:
-            continue
-        seen.add(raw)
-        urls.append(raw)
-
+    urls = filter_scoped_media_entries(entries)
     for url in urls:
         if capture.has_source(url):
             continue

@@ -129,6 +129,6 @@ Re-running skips completed work. Downloads use `.part` files, resume HTTP ranges
 
 The selected browser profile is never reset, copied, or overwritten. The project does not store LinkedIn credentials, cookies, or session tokens.
 
-LinkedIn warns that systematic automated page retrieval can trigger restrictions, including limits after unusually large page-view volume. The scraper supports pacing, stops page processing on HTTP 429 or restriction/security signals, and waits longer before retrying a media 429. This reduces burst traffic; it does not bypass LinkedIn restrictions. citeturn671627search4turn240517search0
+LinkedIn warns that systematic automated page retrieval can trigger restrictions, including limits after unusually large page-view volume. The scraper supports pacing, stops page processing on HTTP 429 or restriction/security signals, and waits longer before retrying a media 429. This reduces burst traffic; it does not bypass LinkedIn restrictions.
 
 LinkedIn's DOM and network behavior can change. The collector and recovery logic may need updates when LinkedIn changes.

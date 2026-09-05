@@ -39,7 +39,14 @@ _TIMESTAMP_SELECTORS = (
 )
 
 _LINK_HREFS_JS = "links => links.map(a => a.href).filter(Boolean)"
-_MEDIA_NODES_JS = "nodes => nodes.map(node => node.currentSrc || node.src || node.getAttribute('src') || node.href || node.getAttribute('href') || '').filter(Boolean)"
+_MEDIA_NODES_JS = """nodes => nodes.map(node => {
+    const attachment = node.closest('[class*=\"feed-shared-document\"], [class*=\"update-components-document\"], [class*=\"feed-shared-article\"], [class*=\"feed-shared-attachment\"], [class*=\"feed-shared-video\"], [class*=\"feed-shared-image\"], [class*=\"feed-shared-carousel\"]');
+    return {
+        url: node.currentSrc || node.src || node.getAttribute('src') || node.href || node.getAttribute('href') || '',
+        tag: node.tagName.toLowerCase(),
+        attached: !!attachment
+    };
+}).filter(x => x.url && x.tag !== 'a' || (x.url && x.attached))"""
 
 
 def _candidate_matches_activity(element, activity_id: str) -> bool:
@@ -321,10 +328,13 @@ def extract_images(post) -> set[str]:
 def extract_direct_media(post, extensions: tuple[str, ...]) -> set[str]:
     media = set()
     try:
-        urls = post.locator("video, audio, source, track, a[href]").evaluate_all(_MEDIA_NODES_JS)
-        for url in urls:
+        entries = post.locator("video, audio, source, track, a[href]").evaluate_all(_MEDIA_NODES_JS)
+        for entry in entries:
+            url = entry.get("url", "")
             lower = url.lower()
-            if url.startswith(("blob:", "data:")):
+            if not url or url.startswith(("blob:", "data:")):
+                continue
+            if entry.get("tag") == "a" and not entry.get("attached"):
                 continue
             if any(ext in lower for ext in extensions):
                 media.add(url)

@@ -216,7 +216,8 @@ async def save_dom_media(
                 tag: node.tagName.toLowerCase(),
                 src: node.currentSrc || node.src || node.getAttribute('src') || '',
                 href: node.href || node.getAttribute('href') || '',
-                actor: !!node.closest('[class*=\\"update-components-actor\\"], [class*=\\"feed-shared-actor\\"], [class*=\\"avatar\\"], [aria-label*=\\"profile picture\\"]'),
+                actor: !!node.closest('[class*=\"update-components-actor\"], [class*=\"feed-shared-actor\"], [class*=\"avatar\"], [aria-label*=\"profile picture\"]'),
+                attachment: !!node.closest('[class*=\"feed-shared-document\"], [class*=\"update-components-document\"], [class*=\"feed-shared-article\"], [class*=\"feed-shared-attachment\"], [class*=\"feed-shared-video\"], [class*=\"feed-shared-image\"], [class*=\"feed-shared-carousel\"]'),
             }))"""
         )
     except Exception:
@@ -233,7 +234,7 @@ async def save_dom_media(
             continue
         if tag == "img" and entry.get("actor"):
             continue
-        if tag == "a" and not _looks_like_media(raw, ""):
+        if tag == "a" and (not entry.get("attachment") or not _looks_like_media(raw, "")):
             continue
         if tag not in {"img", "source", "video", "audio", "a"}:
             continue

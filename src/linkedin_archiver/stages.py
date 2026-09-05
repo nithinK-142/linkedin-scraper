@@ -438,6 +438,16 @@ def archive_posts(
 
                     post = pe.find_main_post(page, activity_id)
                     if post is None:
+                        debug_dir = post_dir / "debug"
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        try:
+                            (debug_dir / "page.html").write_text(page.content(), encoding="utf-8")
+                        except Exception:
+                            pass
+                        try:
+                            page.screenshot(path=str(debug_dir / "page.png"), full_page=True)
+                        except Exception:
+                            pass
                         state.record_post(
                             pid,
                             index=index,
@@ -445,7 +455,10 @@ def archive_posts(
                             status=mf.Status.EXTRACTION_FAILED,
                             error=f"Main post element not found for activity {activity_id}.",
                         )
-                        logger.warning(f"  EXTRACTION_FAILED: main post not found for {activity_id}")
+                        logger.warning(
+                            f"  EXTRACTION_FAILED: main post not found for {activity_id} "
+                            f"(saved page.html/page.png to {debug_dir} for inspection)"
+                        )
                         failed += 1
                         continue
 

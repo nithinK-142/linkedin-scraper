@@ -34,6 +34,7 @@ class MediaCapture:
         self._seen_sources: set[str] = set()
         self._saved: list[dict] = []
         self._seen_saved_sources: set[str] = set()
+        self._seen_hashes: set[str] = set()
         self._index = 0
 
     @property

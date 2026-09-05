@@ -32,6 +32,17 @@ def test_media_capture_unique_path(tmp_path: Path):
     assert capture.unique_media_path(target).name == "video-2.mp4"
 
 
+def test_media_capture_deduplicates_hash(tmp_path: Path):
+    capture = MediaCapture(media_dir=tmp_path)
+    first = tmp_path / "one.jpg"
+    second = tmp_path / "two.jpg"
+    first.write_bytes(b"same")
+    second.write_bytes(b"same")
+    assert capture.add_saved(first, source_url="https://example.test/a.jpg", content_type="image/jpeg", media_kind="image", sha256="same-hash")
+    assert not capture.add_saved(second, source_url="https://example.test/b.jpg", content_type="image/jpeg", media_kind="image", sha256="same-hash")
+    assert capture.saved_count == 1
+
+
 def test_fragmented_video_is_left_for_fmp4_recovery():
     from linkedin_archiver.media_recovery import _is_fragmented_video
 

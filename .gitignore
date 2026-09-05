@@ -19,8 +19,8 @@ data/*.json
 archive/*
 !archive/.gitkeep
 
-# Local, non-secret config overrides
-config.json
+# Local config
+config.local.toml
 
 # OS / editor cruft
 .DS_Store

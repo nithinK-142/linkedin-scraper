@@ -182,3 +182,50 @@ def test_retry_after_seconds_parses_delta_and_http_date():
     delay = retry_after_seconds({"retry-after": format_datetime(future, usegmt=True)})
     assert delay is not None
     assert 0 <= delay <= 4
+
+
+
+def test_config_toml_loads_comments_and_values(tmp_path: Path):
+    from linkedin_archiver.settings import load_config_file
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """# Comment\n[invalid_section]\nignored = true\n""".replace("[invalid_section]\nignored = true\n", "") +
+        """browser = \"brave\"
+profile = \"Profile 4\"
+limit = 25
+sleep = \"2-4\"
+recover_urls = [\"https://www.linkedin.com/feed/update/urn:li:activity:1\"]
+skip_recover = true
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_config_file(config)
+    assert loaded.browser == "brave"
+    assert loaded.profile == "Profile 4"
+    assert loaded.limit == 25
+    assert loaded.sleep == "2-4"
+    assert loaded.recover_urls == ("https://www.linkedin.com/feed/update/urn:li:activity:1",)
+    assert loaded.skip_recover is True
+
+
+def test_repo_config_is_valid_toml():
+    from linkedin_archiver.settings import load_config_file, project_root
+
+    loaded = load_config_file(project_root() / "config.toml")
+    assert loaded.limit is None
+    assert loaded.sleep == "0"
+
+
+def test_configured_cli_flags_are_exposed():
+    from typer.testing import CliRunner
+    from linkedin_archiver.cli import app
+
+    runner = CliRunner()
+    for command in ("profiles", "collect", "archive", "recover", "run"):
+        result = runner.invoke(app, [command, "--help"])
+        assert result.exit_code == 0
+
+    result = runner.invoke(app, ["run", "--help"])
+    assert "--skip-recover" in result.stdout

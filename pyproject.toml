@@ -11,6 +11,7 @@ dependencies = [
   "playwright>=1.45,<2",
   "psutil>=5.9",
   "typer>=0.16,<1",
+  "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.scripts]

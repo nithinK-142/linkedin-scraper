@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass, fields
@@ -114,16 +113,43 @@ MEDIA_LINK_EXTENSIONS = (
     ".mp4", ".webm", ".mov", ".m4v", ".m3u8",
 )
 
-CONFIG_FILE_NAME = "config.json"
+CONFIG_FILE_NAME = "config.toml"
 
 
 @dataclass
 class RuntimeConfig:
-    """Values overridable via an optional config.json. No credentials here."""
-    saved_posts_url: str = SAVED_POSTS_URL
+    """Optional defaults loaded from config.toml. CLI values override these."""
+
+    browser: str | None = None
+    browser_path: str | None = None
+    user_data_dir: str | None = None
+    profile: str | None = None
     cdp_port: int = DEFAULT_CDP_PORT
+
+    saved_posts_url: str = SAVED_POSTS_URL
     page_nav_timeout_ms: int = PAGE_NAV_TIMEOUT_MS
     video_playback_timeout_seconds: int = VIDEO_PLAYBACK_TIMEOUT_SECONDS
+
+    limit: int | None = None
+    sleep: str = "0"
+
+    collect_output: str | None = None
+    archive_input: str | None = None
+    archive_output: str | None = None
+
+    recover_urls: tuple[str, ...] = ()
+    recover_input: str | None = None
+    recover_output: str | None = None
+    playback_timeout: int = VIDEO_PLAYBACK_TIMEOUT_SECONDS
+
+    skip_recover: bool = False
+
+
+def config_path_value(value: str | None) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else project_root() / path
 
 
 def load_config_file(path: Path | None = None) -> RuntimeConfig:
@@ -133,7 +159,26 @@ def load_config_file(path: Path | None = None) -> RuntimeConfig:
     if not config_path.exists():
         return defaults
 
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
+
+    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("config.toml must contain a table")
+
     known_fields = {f.name for f in fields(RuntimeConfig)}
     filtered = {k: v for k, v in raw.items() if k in known_fields}
+
+    if "recover_urls" in filtered:
+        urls = filtered["recover_urls"]
+        if not isinstance(urls, list) or not all(isinstance(url, str) for url in urls):
+            raise ValueError("recover_urls must be an array of strings")
+        filtered["recover_urls"] = tuple(urls)
+
+    if "limit" in filtered and filtered["limit"] is not None:
+        if not isinstance(filtered["limit"], int) or filtered["limit"] < 1:
+            raise ValueError("limit must be an integer >= 1")
+
     return RuntimeConfig(**{**defaults.__dict__, **filtered})

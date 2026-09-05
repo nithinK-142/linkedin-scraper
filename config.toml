@@ -1,0 +1,35 @@
+# LinkedIn Scraper configuration.
+# Uncomment only the settings you want to override.
+# CLI flags always override this file.
+
+# Browser
+# browser = "brave"
+# browser_path = "/path/to/browser"
+# user_data_dir = "~/.config/BraveSoftware/Brave-Browser"
+# profile = "LinkedIn"
+# cdp_port = 9222
+
+# Processing
+# limit = 20
+# sleep = "2-4"
+
+# Collection
+# saved_posts_url = "https://www.linkedin.com/my-items/saved-posts/"
+# collect_output = "data/linkedin_saved_posts.json"
+
+# Archive
+# archive_input = "data/linkedin_saved_posts.json"
+# archive_output = "archive"
+# page_nav_timeout_ms = 60000
+
+# Recovery
+# recover_urls = [
+#   "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/"
+# ]
+# recover_input = "data/failed_posts.json"
+# recover_output = "archive"
+# playback_timeout = 300
+# video_playback_timeout_seconds = 300
+
+# Pipeline
+# skip_recover = false

@@ -63,6 +63,10 @@ Each stage works on its own. `run` passes the same browser/profile through all s
 collect → archive → recover
 ```
 
+## Config
+
+Edit `config.toml` to keep defaults in one place. Uncomment only the settings you need. CLI flags override config values.
+
 Browser/profile flags are available on every browser command:
 
 ```text

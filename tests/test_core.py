@@ -51,6 +51,17 @@ def test_fragmented_video_is_left_for_fmp4_recovery():
     assert _is_fragmented_video(body=b"xxxxmdat", content_type="video/mp4") is True
 
 
+def test_video_box_detection_requires_valid_bmff_boundaries():
+    from linkedin_archiver.video_capture import detect_boxes
+
+    def box(box_type: bytes, payload: bytes = b"") -> bytes:
+        return (len(payload) + 8).to_bytes(4, "big") + box_type + payload
+
+    valid = box(b"ftyp", b"isom") + box(b"moov", b"meta") + box(b"moof", b"frag")
+    assert detect_boxes(valid) == ["ftyp", "moov", "moof"]
+    assert detect_boxes(b"javascript moov mdat ftyp text") == []
+
+
 def test_state_store_persists_post_and_recovers_after_reopen(tmp_path: Path):
     from linkedin_archiver.state import StateStore
 

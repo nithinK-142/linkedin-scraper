@@ -41,7 +41,33 @@ class CaptureState:
 
 
 def detect_boxes(data: bytes) -> list[str]:
-    return [tag.decode() for tag in BOX_TAGS if tag in data]
+    """Return MP4 box types only when they occur at valid ISO-BMFF box boundaries."""
+    found: list[str] = []
+    offset = 0
+    length = len(data)
+
+    while offset + 8 <= length:
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        box_type = data[offset + 4:offset + 8]
+        header_size = 8
+
+        if size == 1:
+            if offset + 16 > length:
+                break
+            size = int.from_bytes(data[offset + 8:offset + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = length - offset
+
+        if size < header_size or offset + size > length:
+            break
+
+        if box_type in BOX_TAGS:
+            found.append(box_type.decode("ascii"))
+
+        offset += size
+
+    return list(dict.fromkeys(found))
 
 
 def content_range_start(header_value: str | None) -> int | None:

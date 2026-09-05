@@ -210,9 +210,7 @@ def filter_scoped_media_entries(entries: list[dict]) -> list[str]:
         if entry.get("actor") or entry.get("in_comment") or entry.get("interactive"):
             continue
         if tag == "img":
-            width = int(entry.get("width") or 0)
-            height = int(entry.get("height") or 0)
-            if not entry.get("attachment") and (width < 200 or height < 150):
+            if not entry.get("attachment"):
                 continue
         elif tag == "a":
             if not entry.get("attachment") or not _looks_like_media(raw, ""):
@@ -220,7 +218,10 @@ def filter_scoped_media_entries(entries: list[dict]) -> list[str]:
         elif tag == "source":
             if not entry.get("inside_media") and not entry.get("attachment"):
                 continue
-        elif tag not in {"video", "audio"}:
+        elif tag in {"video", "audio"}:
+            if not entry.get("attachment") and not entry.get("inside_media"):
+                continue
+        else:
             continue
         seen.add(raw)
         urls.append(raw)

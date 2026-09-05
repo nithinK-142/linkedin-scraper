@@ -46,7 +46,7 @@ _MEDIA_NODES_JS = """nodes => nodes.map(node => {
         tag: node.tagName.toLowerCase(),
         attached: !!attachment
     };
-}).filter(x => x.url && x.tag !== 'a' || (x.url && x.attached))"""
+}).filter(x => x.url && x.attached)"""
 
 
 def _candidate_matches_activity(element, activity_id: str) -> bool:
@@ -188,14 +188,14 @@ def find_main_post(page, activity_id: str):
             continue
 
     # Only use broad containers when no direct activity/permalink evidence
-    # exists. This fallback is deliberately strict to avoid treating the feed
-    # shell or a comment as the target post.
-    if not direct_matches:
-        for selector in ('article', '[role="article"]'):
-            try:
-                candidates.extend(page.locator(selector).all())
-            except Exception:
-                continue
+    # exists. Deliberately NOT done: falling back to "any article on the
+    # page" here previously caused wrong-post matches (grabbing an
+    # unrelated recommended post, ad, or comment thread) whenever the
+    # activity ID could not be found anywhere in the DOM. That produced
+    # exactly the "downloads unrelated media" symptom this function must
+    # not cause. Per this module's own rule: never fall back to the whole
+    # page or an arbitrary first article — if there's no evidence tying an
+    # element to this activity ID, report "not found" rather than guess.
 
     unique = []
     seen_handles = set()
@@ -257,8 +257,6 @@ imgs => imgs.map(img => {
     const attachment = img.closest('[class*="update-components-image"], [class*="feed-shared-image"], [class*="feed-shared-article"], [class*="feed-shared-carousel"], [class*="feed-shared-video"], [class*="document"]');
     return {
         src: img.currentSrc || img.src,
-        width: img.naturalWidth,
-        height: img.naturalHeight,
         actor: !!actor,
         attached: !!attachment && !actor
     };
@@ -266,8 +264,7 @@ imgs => imgs.map(img => {
     x.src &&
     !x.src.startsWith('data:') &&
     !x.src.startsWith('blob:') &&
-    !x.actor &&
-    (x.attached || (x.width >= 200 && x.height >= 150))
+    x.attached
 )
 """
 

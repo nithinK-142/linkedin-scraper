@@ -38,20 +38,6 @@ _TIMESTAMP_SELECTORS = (
     '[class*="update-components-actor__sub-description"]',
 )
 
-_IMAGE_EXTRACTION_JS = """
-imgs => imgs.map(img => ({
-    src: img.currentSrc || img.src,
-    width: img.naturalWidth,
-    height: img.naturalHeight
-})).filter(x =>
-    x.src &&
-    !x.src.startsWith("data:") &&
-    !x.src.startsWith("blob:") &&
-    x.width >= 150 &&
-    x.height >= 100
-)
-"""
-
 _LINK_HREFS_JS = "links => links.map(a => a.href).filter(Boolean)"
 _MEDIA_NODES_JS = "nodes => nodes.map(node => node.currentSrc || node.src || node.getAttribute('src') || node.href || node.getAttribute('href') || '').filter(Boolean)"
 
@@ -75,104 +61,128 @@ def _candidate_matches_activity(element, activity_id: str) -> bool:
         return False
 
 
-def _add_root_candidate(candidates, element, activity_id: str) -> None:
+def _root_score(element, activity_id: str, *, dedicated_post_page: bool) -> int:
+    score = 0
     try:
-        if element.count() == 0 or not element.is_visible():
-            return
-        element = element.first
+        tag = (element.evaluate("el => el.tagName") or "").upper()
+        classes = (element.get_attribute("class") or "").lower()
+        data_urn = element.get_attribute("data-urn") or ""
+        data_id = element.get_attribute("data-id") or ""
+        if tag == "ARTICLE":
+            score += 15
+        if "feed-shared-update-v2" in classes:
+            score += 50
+        if "occludable-update" in classes:
+            score += 20
+        if "update-components-update-v2" in classes:
+            score += 25
+        if activity_id in data_urn or activity_id in data_id:
+            score += 40
         if _candidate_matches_activity(element, activity_id):
-            candidates.add(element)
+            score += 30
+        if "comment" in classes or "reply" in classes:
+            score -= 60
+        if element.locator('[data-testid="expandable-text-box"], div.update-components-text, div.feed-shared-text').count():
+            score += 10
+        if element.locator('a[href*="/in/"], a[href*="/company/"]').count():
+            score += 10
+        if dedicated_post_page and "feed-shared-update-v2" in classes:
+            score += 20
     except Exception:
-        pass
+        return score
+    return score
 
 
 def find_main_post(page, activity_id: str):
-    """Locate the post containing the requested activity ID.
+    """Locate the actual post root for an activity ID.
 
-    LinkedIn has used both ``data-urn`` and ``data-id`` on post roots, and
-    the activity ID can also be exposed only through a permalink inside the
-    post. Use those as fallbacks, then score the matching root candidates.
+    LinkedIn changes its DOM frequently. Prefer activity-ID evidence, then
+    fall back to stable post-container selectors on a dedicated post page.
+    Never use ``article.first`` by itself because that can select a comment.
     """
-    candidates = set()
-    needle = f"urn:li:activity:{activity_id}"
+    candidates = []
+    dedicated_post_page = f"/feed/update/urn:li:activity:{activity_id}" in page.url
 
-    direct_selectors = (
-        f'[data-urn*="{needle}"]',
-        f'[data-id*="{needle}"]',
-    )
-    for selector in direct_selectors:
-        try:
-            for element in page.locator(selector).all():
-                if element.is_visible():
-                    candidates.add(element)
-        except Exception:
-            pass
-
-    # Some layouts expose the activity ID only on a permalink. Promote that
-    # link to the nearest post container instead of treating the link itself
-    # as the post.
+    # Wait for some post container to exist. The old fixed sleep was not enough
+    # when LinkedIn rendered the post asynchronously.
     try:
-        links = page.locator(
-            f'a[href*="urn:li:activity:{activity_id}"], '
-            f'a[href*="/feed/update/urn:li:activity:{activity_id}"]'
-        ).all()
-        for link in links:
-            ancestor_selectors = (
-                "xpath=ancestor::article[1]",
-                'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " feed-shared-update-v2 ")][1]',
-                'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " occludable-update ")][1]',
-                'xpath=ancestor::*[@data-finite-scroll-hotkey-item][1]',
-            )
-            for ancestor_selector in ancestor_selectors:
-                try:
-                    root = link.locator(ancestor_selector)
-                    if root.count() and root.is_visible():
-                        candidates.add(root)
-                        break
-                except Exception:
-                    continue
+        page.wait_for_selector(
+            'article, .feed-shared-update-v2, .occludable-update, [data-finite-scroll-hotkey-item]',
+            state="visible",
+            timeout=10_000,
+        )
     except Exception:
         pass
 
-    # Broad fallback for layouts where neither attribute uses the activity
-    # URN directly. This is slower, so keep it behind the direct strategies.
-    if not candidates:
+    direct_selectors = (
+        f'[data-urn*="urn:li:activity:{activity_id}"]',
+        f'[data-id*="urn:li:activity:{activity_id}"]',
+        f'a[href*="urn:li:activity:{activity_id}"]',
+    )
+    for selector in direct_selectors:
         try:
-            roots = page.locator(
-                'article, .feed-shared-update-v2, .occludable-update, '
-                'div[data-id], div[data-urn], div[data-finite-scroll-hotkey-item]'
-            ).all()
-            for root in roots:
-                _add_root_candidate(candidates, root, activity_id)
+            elements = page.locator(selector).all()
         except Exception:
-            pass
+            elements = []
+        for element in elements:
+            try:
+                if not element.is_visible():
+                    continue
+                root = element
+                if (element.evaluate("el => el.tagName") or "").upper() == "A":
+                    for ancestor_selector in (
+                        "xpath=ancestor::article[1]",
+                        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " feed-shared-update-v2 ")][1]',
+                        'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " occludable-update ")][1]',
+                        'xpath=ancestor::*[@data-finite-scroll-hotkey-item][1]',
+                    ):
+                        try:
+                            ancestor = element.locator(ancestor_selector)
+                            if ancestor.count():
+                                root = ancestor.first
+                                break
+                        except Exception:
+                            continue
+                candidates.append(root)
+            except Exception:
+                continue
 
+    # If the dedicated page does not expose the activity ID in attributes,
+    # score the actual post containers. This is the critical fallback for the
+    # current single-post page layout.
     if not candidates:
-        return None
+        for selector in (
+            '.feed-shared-update-v2',
+            '.occludable-update',
+            '.update-components-update-v2',
+            'article',
+            '[data-finite-scroll-hotkey-item]',
+        ):
+            try:
+                candidates.extend(page.locator(selector).all())
+            except Exception:
+                continue
+
+    # De-duplicate equivalent locator targets by DOM identity.
+    unique = []
+    seen_handles = set()
+    for element in candidates:
+        try:
+            handle = element.evaluate("el => el")
+            key = str(handle)
+        except Exception:
+            key = repr(element)
+        if key in seen_handles:
+            continue
+        seen_handles.add(key)
+        unique.append(element)
 
     scored = []
-    for element in candidates:
+    for element in unique:
         try:
             if not element.is_visible():
                 continue
-
-            score = 0
-            tag = element.evaluate("el => el.tagName")
-            classes = element.get_attribute("class") or ""
-            data_urn = element.get_attribute("data-urn") or ""
-            data_id = element.get_attribute("data-id") or ""
-
-            if tag == "ARTICLE":
-                score += 20
-            if "feed-shared-update-v2" in classes:
-                score += 30
-            if "occludable-update" in classes:
-                score += 10
-            if activity_id in data_urn or activity_id in data_id:
-                score += 20
-            if "comment" in classes.lower():
-                score -= 20
-
+            score = _root_score(element, activity_id, dedicated_post_page=dedicated_post_page)
             scored.append((score, element))
         except Exception:
             continue
@@ -181,7 +191,35 @@ def find_main_post(page, activity_id: str):
         return None
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    return scored[0][1]
+    best_score, best = scored[0]
+    # A random page container is not good enough. Require strong evidence
+    # unless this is a dedicated post page with a known post container.
+    if best_score < 20:
+        return None
+    return best
+
+
+# ---------------------------------------------------------- post media --
+
+_IMAGE_EXTRACTION_JS = """
+imgs => imgs.map(img => {
+    const actor = img.closest('[class*="update-components-actor"], [class*="feed-shared-actor"], [class*="avatar"], [aria-label*="profile picture"]');
+    const attachment = img.closest('[class*="update-components-image"], [class*="feed-shared-image"], [class*="feed-shared-article"], [class*="feed-shared-carousel"], [class*="feed-shared-video"], [class*="document"]');
+    return {
+        src: img.currentSrc || img.src,
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+        actor: !!actor,
+        attached: !!attachment && !actor
+    };
+}).filter(x =>
+    x.src &&
+    !x.src.startsWith('data:') &&
+    !x.src.startsWith('blob:') &&
+    !x.actor &&
+    (x.attached || (x.width >= 200 && x.height >= 150))
+)
+"""
 
 
 def expand_see_more(post, page, wait_ms: int = 700) -> bool:
@@ -272,7 +310,9 @@ def extract_images(post) -> set[str]:
     images = set()
     try:
         for item in post.locator("img").evaluate_all(_IMAGE_EXTRACTION_JS):
-            images.add(item["src"])
+            src = item.get("src") if isinstance(item, dict) else None
+            if src:
+                images.add(src)
     except Exception:
         pass
     return images
@@ -281,10 +321,12 @@ def extract_images(post) -> set[str]:
 def extract_direct_media(post, extensions: tuple[str, ...]) -> set[str]:
     media = set()
     try:
-        urls = post.locator("a[href], video, audio, source, track").evaluate_all(_MEDIA_NODES_JS)
+        urls = post.locator("video, audio, source, track, a[href]").evaluate_all(_MEDIA_NODES_JS)
         for url in urls:
             lower = url.lower()
-            if any(ext in lower for ext in extensions) and not url.startswith(("blob:", "data:")):
+            if url.startswith(("blob:", "data:")):
+                continue
+            if any(ext in lower for ext in extensions):
                 media.add(url)
     except Exception:
         pass

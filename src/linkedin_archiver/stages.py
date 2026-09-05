@@ -562,20 +562,17 @@ async def _recover_one(
     logger,
 ) -> dict:
     target_dir.mkdir(parents=True, exist_ok=True)
-    work_dir = target_dir / "recovery"
-    parts_dir = work_dir / "parts"
     media_dir = target_dir / "media"
-    work_dir.mkdir(parents=True, exist_ok=True)
     media_dir.mkdir(parents=True, exist_ok=True)
-    parts_dir.mkdir(parents=True, exist_ok=True)
 
-    capture = vc.CaptureState(parts_dir=parts_dir)
     media_capture = MediaCapture(media_dir=media_dir, logger=logger)
     tracker = vc.PendingTaskTracker(logger=logger)
+    capture = None
+    work_dir = None
 
     def on_response(response) -> None:
-        tracker.spawn(vc.handle_response(response, capture, logger=logger))
-        tracker.spawn(media_capture.handle_response(response))
+        if capture is not None:
+            tracker.spawn(vc.handle_response(response, capture, logger=logger))
 
     context.on("response", on_response)
 
@@ -598,18 +595,41 @@ async def _recover_one(
         if signal is not None:
             raise SafetyStop(signal)
 
-        # Capture media already represented in the DOM. This complements the
-        # network listener and does not replace video fragment capture.
-        await save_dom_media(context, page, media_dir, url, media_capture, logger)
+        activity_id = activity_id_from_url(url)
+        post = pe.find_main_post(page, activity_id) if activity_id else None
+        if post is None:
+            raise RuntimeError(f"Main post not found for {activity_id or url}.")
 
-        has_video = await page.locator("video").count() > 0
+        try:
+            page.evaluate('el => el.scrollIntoView({block: "center"})', post)
+        except Exception:
+            pass
+
+        pe.expand_see_more(post, page)
+        text = pe.extract_post_text(post)
+        author, username, profile_url = pe.extract_author(post)
+        timestamp = pe.extract_timestamp(post)
+
+        direct_urls = pe.extract_images(post)
+        direct_urls.update(pe.extract_direct_media(post, cfg.MEDIA_LINK_EXTENSIONS))
+        has_video = await post.locator("video").count() > 0
+
+        # Normal media is always scoped to the post root. Fragmented video is
+        # still captured from browser network traffic exactly as before.
+        await save_dom_media(context, page, media_dir, url, media_capture, logger, root=post)
         video_ok = False
         video_reason = "no video element"
         video_result = {"status": "not_present"}
 
         if has_video:
+            work_dir = target_dir / "recovery"
+            parts_dir = work_dir / "parts"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            parts_dir.mkdir(parents=True, exist_ok=True)
+            capture = vc.CaptureState(parts_dir=parts_dir)
+
             video_ok, video_reason = await vc.handle_video_playback(
-                page, playback_timeout, logger=logger
+                post, playback_timeout, logger=logger
             )
             await tracker.drain()
             vc.write_capture_json(work_dir, url, capture)
@@ -629,7 +649,6 @@ async def _recover_one(
             else:
                 video_result = {"status": "no_data"}
 
-        await save_dom_media(context, page, media_dir, url, media_capture, logger)
         await tracker.drain()
         await media_capture.drain()
 
@@ -644,12 +663,26 @@ async def _recover_one(
                 media_kind="video",
             )
 
-        status = "completed" if media_capture.saved_count else "media_failed"
+        expected_media = len(direct_urls) > 0 or has_video
+        media_ok = not expected_media or media_capture.saved_count > 0
+        status = "completed" if media_ok else "media_failed"
+        data = {
+            "url": url,
+            "activity_id": activity_id,
+            "author": author,
+            "username": username,
+            "profile_url": profile_url,
+            "timestamp": timestamp,
+            "text": text,
+            "media": media_capture.saved_items,
+        }
+        save_post(target_dir, data)
         return {
             "status": status,
             "media_count": media_capture.saved_count,
             "video": video_result,
             "video_playback": {"started": video_ok, "reason": video_reason},
+            "data": data,
         }
     finally:
         context.remove_listener("response", on_response)
@@ -752,7 +785,7 @@ def recover_media(
                         await sleep_interval.wait_async(logger, "before next post")
                     page_visits += 1
 
-                    logger.info(f"[{index}/{len(direct_urls)}] Recovering media: {url}")
+                    logger.info(f"[{index}/{len(direct_urls)}] Recovering post: {url}")
                     try:
                         safety_monitor.raise_if_triggered()
                         await _check_page_safety_async(page, logger)
@@ -774,7 +807,7 @@ def recover_media(
                             state.update_media_recovered(post_id, result["media_count"])
                         else:
                             failed += 1
-                        logger.info(f"  recovered media={result['media_count']} status={result['status']}")
+                        logger.info(f"  saved post media={result['media_count']} status={result['status']}")
                     except KeyboardInterrupt:
                         logger.warning("Interrupted.")
                         break

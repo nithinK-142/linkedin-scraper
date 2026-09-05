@@ -41,6 +41,10 @@ class MediaCapture:
     def saved_count(self) -> int:
         return len(self._saved)
 
+    @property
+    def saved_items(self) -> list[dict]:
+        return list(self._saved)
+
     def has_source(self, source_url: str) -> bool:
         return source_url in self._seen_saved_sources
 
@@ -181,16 +185,33 @@ def _extension(url: str, content_type: str) -> str:
     return mimetypes.guess_extension(content_type) or ".bin"
 
 
-async def save_dom_media(context, page, media_dir: Path, referer: str, capture: MediaCapture, logger=None) -> None:
-    """Download media URLs visible in the page using the authenticated browser context."""
+async def save_dom_media(
+    context,
+    page,
+    media_dir: Path,
+    referer: str,
+    capture: MediaCapture,
+    logger=None,
+    root=None,
+) -> None:
+    """Download only media belonging to ``root``.
+
+    The old implementation scanned the entire page. On a LinkedIn post page
+    that includes avatars, reaction icons, recommendation cards, and other
+    unrelated resources. When a post root is available, only nodes inside
+    that post are eligible.
+    """
     media_dir.mkdir(parents=True, exist_ok=True)
+    scope = root or page
     try:
-        entries = await page.locator("img, picture source, video, audio, source, a[href]").evaluate_all(
+        entries = await scope.locator(
+            "img, picture source, video, audio, source, a[href]"
+        ).evaluate_all(
             """nodes => nodes.map(node => ({
                 tag: node.tagName.toLowerCase(),
                 src: node.currentSrc || node.src || node.getAttribute('src') || '',
                 href: node.href || node.getAttribute('href') || '',
-                poster: node.poster || node.getAttribute('poster') || ''
+                actor: !!node.closest('[class*=\\"update-components-actor\\"], [class*=\\"feed-shared-actor\\"], [class*=\\"avatar\\"], [aria-label*=\\"profile picture\\"]'),
             }))"""
         )
     except Exception:
@@ -199,34 +220,57 @@ async def save_dom_media(context, page, media_dir: Path, referer: str, capture: 
     urls: list[str] = []
     seen: set[str] = set()
     for entry in entries:
-        candidates = [entry.get("src"), entry.get("poster"), entry.get("href")]
-        for raw in candidates:
-            if raw and raw not in seen and _looks_like_media(raw, ""):
-                seen.add(raw)
-                urls.append(raw)
+        tag = entry.get("tag")
+        raw = entry.get("src") or entry.get("href")
+        if not raw or raw.startswith(("blob:", "data:")) or raw in seen:
+            continue
+        if tag == "img" and entry.get("actor"):
+            continue
+        if tag == "a" and not _looks_like_media(raw, ""):
+            continue
+        if tag not in {"img", "source", "video", "audio", "a"}:
+            continue
+        seen.add(raw)
+        urls.append(raw)
 
     for url in urls:
         if capture.has_source(url):
             continue
         try:
-            digest = hashlib.sha1(url.encode()).hexdigest()[:10]
-            path = capture.unique_media_path(media_dir / f"media_{digest}{_extension(url, "application/octet-stream")}")
             result = await download_async(
                 context,
                 url,
-                path,
+                media_dir / f".media-{hashlib.sha1(url.encode()).hexdigest()[:12]}.download",
                 referer=referer,
                 policy=RetryPolicy(),
                 logger=logger,
             )
+            temp_path = Path(result["path"])
             content_type = result["content_type"]
-            body = path.read_bytes()
-            if not _looks_like_media(url, content_type) or _is_fragmented_video(body=body, content_type=content_type):
-                path.unlink(missing_ok=True)
+            if not _looks_like_media(url, content_type):
+                temp_path.unlink(missing_ok=True)
                 continue
+            if _is_fragmented_video(body=temp_path.read_bytes(), content_type=content_type):
+                temp_path.unlink(missing_ok=True)
+                continue
+
+            extension = _extension(url, content_type)
+            path = capture.unique_media_path(media_dir / f"media_{capture.saved_count + 1:02d}{extension}")
+            temp_path.replace(path)
             kind = content_type.split("/", 1)[0] if "/" in content_type else "media"
-            if not capture.add_saved(path, source_url=url, content_type=content_type, media_kind=kind, sha256=result["sha256"]):
+            if not capture.add_saved(
+                path,
+                source_url=url,
+                content_type=content_type,
+                media_kind=kind,
+                sha256=result["sha256"],
+            ):
                 path.unlink(missing_ok=True)
         except Exception as exc:
+            try:
+                Path(media_dir / f".media-{hashlib.sha1(url.encode()).hexdigest()[:12]}.download").unlink(missing_ok=True)
+            except Exception:
+                pass
             if logger:
                 logger.debug(f"    DOM media download failed: {url[:120]} ({exc})")
+

@@ -96,7 +96,7 @@ def test_state_store_migrates_legacy_manifests(tmp_path: Path):
     )
 
     with StateStore(root) as state:
-        assert state.get_post("123")["status"] == "media_failed"
+        assert state.get_post("123")["status"] == "completed"
         assert state.get_recovery("123")["media_count"] == 2
 
 

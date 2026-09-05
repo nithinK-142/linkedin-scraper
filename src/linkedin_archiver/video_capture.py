@@ -98,13 +98,9 @@ class PendingTaskTracker:
 
 async def handle_response(response, state: CaptureState, logger=None) -> None:
     request = response.request
-    try:
-        err = await response.finished()
-    except Exception:
-        err = "exception while waiting for response to finish"
-    if err:
-        return
 
+    # response.body() waits for the response body and avoids creating the
+    # extra Response.finished() task that can outlive a page during teardown.
     try:
         body = await response.body()
     except Exception:

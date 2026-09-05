@@ -253,6 +253,15 @@ def test_configured_cli_flags_are_exposed():
     assert "--skip-recover" in result.stdout
 
 
+
+def test_stream_manifests_are_not_downloaded_as_media_files():
+    from linkedin_archiver.media_recovery import is_stream_manifest
+
+    assert is_stream_manifest("https://example.test/video.m3u8")
+    assert is_stream_manifest("https://example.test/video.mpd")
+    assert not is_stream_manifest("https://example.test/video.mp4")
+
+
 def test_browser_session_tracks_process_ownership():
     from linkedin_archiver.browser import BrowserSession
 

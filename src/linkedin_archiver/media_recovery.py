@@ -17,6 +17,7 @@ from linkedin_archiver.downloader import RetryPolicy, atomic_write_bytes, downlo
 
 MEDIA_CONTENT_PREFIXES = ("image/", "audio/", "video/")
 MEDIA_CONTENT_TYPES = {"application/pdf", "application/zip"}
+STREAM_MANIFEST_SUFFIXES = {".m3u8", ".mpd"}
 MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg",
     ".mp4", ".webm", ".mov", ".m4v", ".mp3", ".wav", ".m4a",
@@ -171,6 +172,10 @@ def _is_fragmented_video(*, body: bytes | None, content_type: str) -> bool:
     return b"moof" in boxes or (b"mdat" in boxes and b"ftyp" not in boxes and b"moov" not in boxes)
 
 
+def is_stream_manifest(url: str) -> bool:
+    return Path(urlsplit(url).path.lower()).suffix in STREAM_MANIFEST_SUFFIXES
+
+
 def _looks_like_media(url: str, content_type: str) -> bool:
     if content_type in MEDIA_CONTENT_TYPES or content_type.startswith(MEDIA_CONTENT_PREFIXES):
         return True
@@ -223,6 +228,8 @@ async def save_dom_media(
         tag = entry.get("tag")
         raw = entry.get("src") or entry.get("href")
         if not raw or raw.startswith(("blob:", "data:")) or raw in seen:
+            continue
+        if is_stream_manifest(raw):
             continue
         if tag == "img" and entry.get("actor"):
             continue

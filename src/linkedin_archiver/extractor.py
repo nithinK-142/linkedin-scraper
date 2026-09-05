@@ -56,48 +56,132 @@ _LINK_HREFS_JS = "links => links.map(a => a.href).filter(Boolean)"
 _MEDIA_NODES_JS = "nodes => nodes.map(node => node.currentSrc || node.src || node.getAttribute('src') || node.href || node.getAttribute('href') || '').filter(Boolean)"
 
 
-def find_main_post(page, activity_id: str):
-    """Locate the post element matching ``activity_id``, scoring
-    candidates so the real post (not a comment referencing the same
-    activity) wins."""
-    selector = f'[data-urn*="urn:li:activity:{activity_id}"]'
-    matches = page.locator(selector).all()
+def _candidate_matches_activity(element, activity_id: str) -> bool:
+    needle = f"urn:li:activity:{activity_id}"
+    for attr in ("data-urn", "data-id"):
+        try:
+            value = element.get_attribute(attr) or ""
+            if needle in value or activity_id in value:
+                return True
+        except Exception:
+            pass
 
-    if not matches:
+    try:
+        return element.locator(
+            f'a[href*="urn:li:activity:{activity_id}"], '
+            f'a[href*="/feed/update/urn:li:activity:{activity_id}"]'
+        ).count() > 0
+    except Exception:
+        return False
+
+
+def _add_root_candidate(candidates, element, activity_id: str) -> None:
+    try:
+        if element.count() == 0 or not element.is_visible():
+            return
+        element = element.first
+        if _candidate_matches_activity(element, activity_id):
+            candidates.add(element)
+    except Exception:
+        pass
+
+
+def find_main_post(page, activity_id: str):
+    """Locate the post containing the requested activity ID.
+
+    LinkedIn has used both ``data-urn`` and ``data-id`` on post roots, and
+    the activity ID can also be exposed only through a permalink inside the
+    post. Use those as fallbacks, then score the matching root candidates.
+    """
+    candidates = set()
+    needle = f"urn:li:activity:{activity_id}"
+
+    direct_selectors = (
+        f'[data-urn*="{needle}"]',
+        f'[data-id*="{needle}"]',
+    )
+    for selector in direct_selectors:
+        try:
+            for element in page.locator(selector).all():
+                if element.is_visible():
+                    candidates.add(element)
+        except Exception:
+            pass
+
+    # Some layouts expose the activity ID only on a permalink. Promote that
+    # link to the nearest post container instead of treating the link itself
+    # as the post.
+    try:
+        links = page.locator(
+            f'a[href*="urn:li:activity:{activity_id}"], '
+            f'a[href*="/feed/update/urn:li:activity:{activity_id}"]'
+        ).all()
+        for link in links:
+            ancestor_selectors = (
+                "xpath=ancestor::article[1]",
+                'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " feed-shared-update-v2 ")][1]',
+                'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " occludable-update ")][1]',
+                'xpath=ancestor::*[@data-finite-scroll-hotkey-item][1]',
+            )
+            for ancestor_selector in ancestor_selectors:
+                try:
+                    root = link.locator(ancestor_selector)
+                    if root.count() and root.is_visible():
+                        candidates.add(root)
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # Broad fallback for layouts where neither attribute uses the activity
+    # URN directly. This is slower, so keep it behind the direct strategies.
+    if not candidates:
+        try:
+            roots = page.locator(
+                'article, .feed-shared-update-v2, .occludable-update, '
+                'div[data-id], div[data-urn], div[data-finite-scroll-hotkey-item]'
+            ).all()
+            for root in roots:
+                _add_root_candidate(candidates, root, activity_id)
+        except Exception:
+            pass
+
+    if not candidates:
         return None
 
-    candidates = []
-
-    for element in matches:
+    scored = []
+    for element in candidates:
         try:
             if not element.is_visible():
                 continue
 
             score = 0
-            try:
-                if element.evaluate("el => el.tagName") == "ARTICLE":
-                    score += 10
-            except Exception:
-                pass
+            tag = element.evaluate("el => el.tagName")
+            classes = element.get_attribute("class") or ""
+            data_urn = element.get_attribute("data-urn") or ""
+            data_id = element.get_attribute("data-id") or ""
 
-            try:
-                classes = element.get_attribute("class") or ""
-                if "feed-shared-update-v2" in classes:
-                    score += 20
-                if "feed-shared-update-v2__commentary" in classes:
-                    score += 30
-            except Exception:
-                pass
+            if tag == "ARTICLE":
+                score += 20
+            if "feed-shared-update-v2" in classes:
+                score += 30
+            if "occludable-update" in classes:
+                score += 10
+            if activity_id in data_urn or activity_id in data_id:
+                score += 20
+            if "comment" in classes.lower():
+                score -= 20
 
-            candidates.append((score, element))
+            scored.append((score, element))
         except Exception:
             continue
 
-    if not candidates:
+    if not scored:
         return None
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
 
 
 def expand_see_more(post, page, wait_ms: int = 700) -> bool:

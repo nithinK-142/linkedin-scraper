@@ -31,7 +31,6 @@ from linkedin_archiver.safety import SafetyMonitor, SafetyStop, inspect_url_and_
 from linkedin_archiver.throttle import SleepInterval, parse_sleep
 from linkedin_archiver.settings import (
     archive_dir,
-    default_failed_posts_file,
     default_saved_posts_file,
     setup_logging,
 )
@@ -661,15 +660,6 @@ async def _recover_one(
 def _recovery_targets(state: StateStore) -> list[tuple[int, str, str]]:
     return state.unresolved_posts()
 
-def _write_failed_posts_file(archive_root: Path, output_path: Path, logger) -> int:
-    with StateStore(archive_root) as state:
-        rows = _recovery_targets(state)
-    urls = [url for _, _, url in rows]
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(urls, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info(f"{len(urls)} unresolved post(s) written to {output_path}")
-    return len(urls)
-
 
 def recover_media(
     target: ResolvedBrowserTarget,
@@ -691,14 +681,14 @@ def recover_media(
     archive_root = archive_root or archive_dir()
 
     if input_file is None and not urls:
-        failed_file = default_failed_posts_file()
-        if failed_file.exists():
-            input_file = failed_file
-        else:
-            _write_failed_posts_file(archive_root, failed_file, logger)
-            input_file = failed_file
-
-    direct_urls = _load_urls(input_file, urls, logger)
+        state_for_targets = StateStore(archive_root)
+        try:
+            target_rows = _recovery_targets(state_for_targets)
+            direct_urls = [url for _, _, url in target_rows]
+        finally:
+            state_for_targets.close()
+    else:
+        direct_urls = _load_urls(input_file, urls, logger)
     try:
         direct_urls = _limit_items(direct_urls, limit)
     except ValueError as exc:
@@ -859,11 +849,9 @@ def run_all(
             logger.info("Recovery skipped.")
             return 0
 
-        _write_failed_posts_file(archive_dir(), default_failed_posts_file(), logger)
         logger.info("Stage 3: recover media")
         recover_rc = recover_media(
             target,
-            input_file=default_failed_posts_file(),
             limit=limit,
             sleep=sleep,
             assume_yes=True,

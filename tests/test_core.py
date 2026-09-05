@@ -317,3 +317,25 @@ def test_logging_mirrors_console_level_to_file(tmp_path: Path):
     for handler in logger.handlers:
         handler.close()
     logger.handlers.clear()
+
+
+def test_recovered_post_is_no_longer_unresolved(tmp_path: Path):
+    from linkedin_archiver.state import StateStore
+
+    root = tmp_path / "archive"
+    url = "https://www.linkedin.com/feed/update/urn:li:activity:456"
+    with StateStore(root) as state:
+        state.record_post("456", index=1, url=url, status="extraction_failed")
+        assert state.unresolved_posts() == [(1, "456", url)]
+
+        state.record_recovery(
+            "456",
+            index=1,
+            url=url,
+            status="completed",
+            media_count=4,
+        )
+
+        assert state.get_post("456")["status"] == "completed"
+        assert state.unresolved_posts() == []
+        assert state.is_post_done("456")

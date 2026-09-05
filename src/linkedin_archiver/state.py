@@ -82,8 +82,22 @@ class StateStore:
         return dict(row) if row else None
 
     def is_post_done(self, post_id: str) -> bool:
-        row = self.conn.execute("SELECT status FROM posts WHERE post_id = ?", (post_id,)).fetchone()
-        return bool(row and row["status"] in Status.TERMINAL_SUCCESS)
+        row = self.conn.execute(
+            """
+            SELECT p.status AS post_status, r.status AS recovery_status
+            FROM posts p
+            LEFT JOIN recovery r ON r.post_id = p.post_id
+            WHERE p.post_id = ?
+            """,
+            (post_id,),
+        ).fetchone()
+        return bool(
+            row
+            and (
+                row["post_status"] in Status.TERMINAL_SUCCESS
+                or row["recovery_status"] == "completed"
+            )
+        )
 
     def record_post(
         self,
@@ -130,10 +144,13 @@ class StateStore:
     def unresolved_posts(self) -> list[tuple[int, str, str]]:
         rows = self.conn.execute(
             """
-            SELECT item_index, post_id, url
-            FROM posts
-            WHERE url <> ? AND status <> ?
-            ORDER BY item_index, post_id
+            SELECT p.item_index, p.post_id, p.url
+            FROM posts p
+            LEFT JOIN recovery r ON r.post_id = p.post_id
+            WHERE p.url <> ?
+              AND p.status <> ?
+              AND COALESCE(r.status, '') <> 'completed'
+            ORDER BY p.item_index, p.post_id
             """,
             ("", Status.COMPLETED),
         ).fetchall()
@@ -158,6 +175,7 @@ class StateStore:
         video: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
+        now = _now()
         self.conn.execute(
             """
             INSERT INTO recovery
@@ -172,8 +190,13 @@ class StateStore:
                 error=excluded.error,
                 updated_at=excluded.updated_at
             """,
-            (post_id, index, url, status, media_count, json.dumps(video, ensure_ascii=False) if video is not None else None, error, _now()),
+            (post_id, index, url, status, media_count, json.dumps(video, ensure_ascii=False) if video is not None else None, error, now),
         )
+        if status == "completed":
+            self.conn.execute(
+                "UPDATE posts SET status = ?, error = NULL, media_recovered = MAX(media_recovered, ?), updated_at = ? WHERE post_id = ?",
+                (Status.COMPLETED, media_count, now, post_id),
+            )
         self.conn.commit()
 
     def post_counts(self) -> dict[str, int]:

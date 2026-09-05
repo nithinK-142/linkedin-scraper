@@ -239,6 +239,73 @@ class BrowserSessionError(RuntimeError):
     """Raised when we cannot safely establish a CDP session."""
 
 
+@dataclass
+class BrowserSession:
+    """CDP endpoint plus ownership of a browser process launched by us."""
+
+    cdp_url: str
+    port: int
+    process: subprocess.Popen | None = None
+
+    @property
+    def owned(self) -> bool:
+        return self.process is not None
+
+    def close(self, logger=None) -> None:
+        """Close only a browser process started by this scraper."""
+        if self.process is None:
+            if logger:
+                logger.info("Browser: left running (attached to existing session).")
+            return
+
+        process = self.process
+        self.process = None
+
+        try:
+            import psutil  # type: ignore
+        except ImportError:
+            psutil = None
+
+        try:
+            if psutil is not None:
+                try:
+                    parent = psutil.Process(process.pid)
+                    children = parent.children(recursive=True)
+                except psutil.Error:
+                    children = []
+                for child in children:
+                    try:
+                        child.terminate()
+                    except psutil.Error:
+                        pass
+                try:
+                    parent.terminate()
+                except psutil.Error:
+                    pass
+                _, alive = psutil.wait_procs(children + [parent], timeout=5)
+                for proc in alive:
+                    try:
+                        proc.kill()
+                    except psutil.Error:
+                        pass
+                if logger:
+                    logger.info("Browser: closed (launched by scraper).")
+                return
+
+            process.terminate()
+            process.wait(timeout=5)
+            if logger:
+                logger.info("Browser: closed (launched by scraper).")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if logger:
+                logger.warning(f"Browser close failed: {exc}")
+
+
 def _http_get_json(url: str, timeout: float) -> dict | None:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -342,7 +409,7 @@ def launch_browser(
 def ensure_browser_session(
     spec: BrowserSpec, executable: str, user_data_dir: Path, profile_directory: str, port: int,
     *, start_url: str | None = None, logger=None, assume_yes: bool = False,
-) -> str:
+) -> BrowserSession:
     """Return a usable CDP HTTP endpoint, or raise BrowserSessionError.
     Never launches Playwright's bundled Chromium; never creates, copies,
     or resets a profile."""
@@ -373,7 +440,7 @@ def ensure_browser_session(
                     f"against the selected profile."
                 )
 
-        return cdp_http_url(port)
+        return BrowserSession(cdp_http_url(port), port=port)
 
     if is_browser_process_running(spec):
         raise BrowserSessionError(
@@ -390,18 +457,26 @@ def ensure_browser_session(
     log(f"Launching {spec.display_name} with profile '{profile_directory}' "
         f"and remote debugging on port {port}...")
 
-    launch_browser(executable, user_data_dir, profile_directory, port, start_url=start_url)
+    process = launch_browser(executable, user_data_dir, profile_directory, port, start_url=start_url)
 
     if not wait_for_cdp_port(port, timeout=30):
+        try:
+            process.terminate()
+        except OSError:
+            pass
         raise BrowserSessionError(
             f"{spec.display_name} did not open a usable debugging port on {port} "
             f"within 30 seconds."
         )
 
     if get_cdp_ws_url(port) is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
         raise BrowserSessionError(f"{spec.display_name} launched, but the CDP endpoint is not usable. Aborting.")
 
-    return cdp_http_url(port)
+    return BrowserSession(cdp_http_url(port), port=port, process=process)
 
 
 def find_or_open_page(context, url_hint: str = "linkedin.com"):

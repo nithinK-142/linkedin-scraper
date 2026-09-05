@@ -17,6 +17,7 @@ from linkedin_archiver import linkedin_data as mf
 from linkedin_archiver import settings as cfg
 from linkedin_archiver import video_capture as vc
 from linkedin_archiver.browser import (
+    BrowserSession,
     BrowserSessionError,
     ResolvedBrowserTarget,
     ensure_browser_session,
@@ -72,7 +73,7 @@ def resolve_target(
     return resolve_browser_target(args, default_port=runtime_config.cdp_port)
 
 
-def _ensure_session(target: ResolvedBrowserTarget, *, start_url: str | None, logger, assume_yes: bool) -> str:
+def _ensure_session(target: ResolvedBrowserTarget, *, start_url: str | None, logger, assume_yes: bool) -> BrowserSession:
     try:
         return ensure_browser_session(
             target.spec,
@@ -159,6 +160,7 @@ def collect_saved_posts(
     sleep: str | float | SleepInterval = "0",
     assume_yes: bool = False,
     logger=None,
+    session: BrowserSession | None = None,
 ) -> int:
     logger = logger or setup_logging("collect")
     runtime_config = cfg.load_config_file()
@@ -169,125 +171,130 @@ def collect_saved_posts(
     _log_sleep_interval(sleep_interval, logger)
     _log_target(target, logger)
 
-    cdp_url = _ensure_session(
+    owns_session = session is None
+    session = session or _ensure_session(
         target,
         start_url=runtime_config.saved_posts_url,
         logger=logger,
         assume_yes=assume_yes,
     )
+    cdp_url = session.cdp_url
 
-    with sync_playwright() as p:
-        logger.info(f"Connecting over CDP: {cdp_url}")
-        browser = p.chromium.connect_over_cdp(cdp_url, timeout=10_000)
-        if not browser.contexts:
-            logger.error("No browser context found after connecting.")
-            return 1
-
-        context = browser.contexts[0]
-        page = find_or_open_page(context, url_hint="linkedin.com")
-        safety_monitor = SafetyMonitor()
-        page.on("response", lambda response: safety_monitor.observe_response(response.url, response.status))
-        urls: list[str] = []
-        seen: set[str] = set()
-
-        def save_urls() -> None:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(json.dumps(urls, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        def add_urls(candidates: Iterable[str]) -> None:
-            for candidate in candidates:
-                normalized = normalize_url(candidate)
-                if not normalized or normalized in seen:
-                    continue
-                seen.add(normalized)
-                urls.append(normalized)
-                logger.debug(f"FOUND [{len(urls):04}] {normalized}")
-                save_urls()
-
-        def on_response(response) -> None:
-            try:
-                if "linkedin.com" not in response.url:
-                    return
-                request = response.request
-                if request.resource_type not in {"document", "xhr", "fetch"}:
-                    return
-                content_type = response.headers.get("content-type", "").lower()
-                if not any(v in content_type for v in ("json", "javascript", "html", "text")):
-                    return
-                add_urls(extract_activity_urls_from_text(response.text()))
-            except Exception:
-                pass
-
-        page.on("response", on_response)
-
-        try:
-            logger.info(f"Opening: {runtime_config.saved_posts_url}")
-            page.goto(
-                runtime_config.saved_posts_url,
-                wait_until="domcontentloaded",
-                timeout=cfg.PAGE_NAV_TIMEOUT_MS,
-            )
-            page.wait_for_timeout(5000)
-            safety_monitor.raise_if_triggered()
-            _check_page_safety(page, logger)
-
-            if "login" in page.url.lower():
-                logger.error("LinkedIn is not logged in on this profile.")
+    try:
+        with sync_playwright() as p:
+            logger.info(f"Connecting over CDP: {cdp_url}")
+            browser = p.chromium.connect_over_cdp(cdp_url, timeout=10_000)
+            if not browser.contexts:
+                logger.error("No browser context found after connecting.")
                 return 1
 
-            logger.info("Collecting saved-post URLs...")
-            unchanged_rounds = 0
-            last_scroll_y = -1
+            context = browser.contexts[0]
+            page = find_or_open_page(context, url_hint="linkedin.com")
+            safety_monitor = SafetyMonitor()
+            page.on("response", lambda response: safety_monitor.observe_response(response.url, response.status))
+            urls: list[str] = []
+            seen: set[str] = set()
 
-            for iteration in range(cfg.MAX_SCROLL_ITERATIONS):
-                safety_monitor.raise_if_triggered()
-                before = len(urls)
-                if limit is not None and len(urls) >= limit:
-                    break
-                add_urls(_collect_dom_urls(page))
-                _click_show_more(page)
-                page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 0.60));")
-                page.wait_for_timeout(cfg.SCROLL_SETTLE_TIMEOUT_MS)
-                add_urls(_collect_dom_urls(page))
-                if limit is not None and len(urls) >= limit:
-                    break
+            def save_urls() -> None:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(urls, indent=2, ensure_ascii=False), encoding="utf-8")
 
-                scroll_y = page.evaluate("window.scrollY")
-                scroll_height = page.evaluate("document.documentElement.scrollHeight")
-                viewport_height = page.evaluate("window.innerHeight")
-                reached_bottom = scroll_y + viewport_height >= scroll_height - 100
+            def add_urls(candidates: Iterable[str]) -> None:
+                for candidate in candidates:
+                    normalized = normalize_url(candidate)
+                    if not normalized or normalized in seen:
+                        continue
+                    seen.add(normalized)
+                    urls.append(normalized)
+                    logger.debug(f"FOUND [{len(urls):04}] {normalized}")
+                    save_urls()
 
-                logger.debug(
-                    f"SCAN [{iteration + 1:03}] posts={len(urls)} "
-                    f"scroll={scroll_y:.0f}/{scroll_height:.0f}"
+            def on_response(response) -> None:
+                try:
+                    if "linkedin.com" not in response.url:
+                        return
+                    request = response.request
+                    if request.resource_type not in {"document", "xhr", "fetch"}:
+                        return
+                    content_type = response.headers.get("content-type", "").lower()
+                    if not any(v in content_type for v in ("json", "javascript", "html", "text")):
+                        return
+                    add_urls(extract_activity_urls_from_text(response.text()))
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
+            try:
+                logger.info(f"Opening: {runtime_config.saved_posts_url}")
+                page.goto(
+                    runtime_config.saved_posts_url,
+                    wait_until="domcontentloaded",
+                    timeout=cfg.PAGE_NAV_TIMEOUT_MS,
                 )
+                page.wait_for_timeout(5000)
+                safety_monitor.raise_if_triggered()
+                _check_page_safety(page, logger)
 
-                if len(urls) == before and reached_bottom and scroll_y == last_scroll_y:
-                    unchanged_rounds += 1
-                else:
-                    unchanged_rounds = 0
-                last_scroll_y = scroll_y
+                if "login" in page.url.lower():
+                    logger.error("LinkedIn is not logged in on this profile.")
+                    return 1
 
-                if unchanged_rounds >= cfg.MAX_UNCHANGED_SCROLL_ROUNDS:
-                    break
-                if sleep_interval.enabled and iteration < cfg.MAX_SCROLL_ITERATIONS - 1:
-                    sleep_interval.wait(logger, "before next scan")
-        except KeyboardInterrupt:
-            logger.warning("Stopped by user.")
-        except SafetyStop as exc:
-            logger.error(f"Safety stop: {exc.signal.message}")
-            return 3
-        except Exception as exc:
-            logger.warning(f"Browser/session stopped: {exc}")
-        finally:
-            if limit is not None:
-                urls[:] = urls[:limit]
-            save_urls()
-            logger.info(f"Collected: {len(urls)} unique post URLs")
-            logger.info(f"Saved to: {output.resolve()}")
-            logger.info("Done. (Browser was left running untouched.)")
+                logger.info("Collecting saved-post URLs...")
+                unchanged_rounds = 0
+                last_scroll_y = -1
 
-    return 0
+                for iteration in range(cfg.MAX_SCROLL_ITERATIONS):
+                    safety_monitor.raise_if_triggered()
+                    before = len(urls)
+                    if limit is not None and len(urls) >= limit:
+                        break
+                    add_urls(_collect_dom_urls(page))
+                    _click_show_more(page)
+                    page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 0.60));")
+                    page.wait_for_timeout(cfg.SCROLL_SETTLE_TIMEOUT_MS)
+                    add_urls(_collect_dom_urls(page))
+                    if limit is not None and len(urls) >= limit:
+                        break
+
+                    scroll_y = page.evaluate("window.scrollY")
+                    scroll_height = page.evaluate("document.documentElement.scrollHeight")
+                    viewport_height = page.evaluate("window.innerHeight")
+                    reached_bottom = scroll_y + viewport_height >= scroll_height - 100
+
+                    logger.debug(
+                        f"SCAN [{iteration + 1:03}] posts={len(urls)} "
+                        f"scroll={scroll_y:.0f}/{scroll_height:.0f}"
+                    )
+
+                    if len(urls) == before and reached_bottom and scroll_y == last_scroll_y:
+                        unchanged_rounds += 1
+                    else:
+                        unchanged_rounds = 0
+                    last_scroll_y = scroll_y
+
+                    if unchanged_rounds >= cfg.MAX_UNCHANGED_SCROLL_ROUNDS:
+                        break
+                    if sleep_interval.enabled and iteration < cfg.MAX_SCROLL_ITERATIONS - 1:
+                        sleep_interval.wait(logger, "before next scan")
+            except KeyboardInterrupt:
+                logger.warning("Stopped by user.")
+            except SafetyStop as exc:
+                logger.error(f"Safety stop: {exc.signal.message}")
+                return 3
+            except Exception as exc:
+                logger.warning(f"Browser/session stopped: {exc}")
+            finally:
+                if limit is not None:
+                    urls[:] = urls[:limit]
+                save_urls()
+                logger.info(f"Collected: {len(urls)} unique post URLs")
+                logger.info(f"Saved to: {output.resolve()}")
+
+        return 0
+    finally:
+        if owns_session:
+            session.close(logger)
 
 
 def _collect_dom_urls(page) -> list[str]:
@@ -354,6 +361,7 @@ def archive_posts(
     sleep: str | float | SleepInterval = "0",
     assume_yes: bool = False,
     logger=None,
+    session: BrowserSession | None = None,
 ) -> int:
     logger = logger or setup_logging("archive")
     runtime_config = cfg.load_config_file()
@@ -384,7 +392,9 @@ def archive_posts(
     state = StateStore(output_dir)
     _log_target(target, logger)
 
-    cdp_url = _ensure_session(target, start_url=None, logger=logger, assume_yes=assume_yes)
+    owns_session = session is None
+    session = session or _ensure_session(target, start_url=None, logger=logger, assume_yes=assume_yes)
+    cdp_url = session.cdp_url
 
     try:
         with sync_playwright() as p:
@@ -507,11 +517,13 @@ def archive_posts(
             state.sync_legacy_snapshots()
             logger.info(f"Done. completed={completed} skipped={skipped} failed={failed}")
             logger.info(f"Archive: {output_dir.resolve()}")
-            logger.info("(Browser was left running untouched.)")
+            logger.info("Archive stage complete.")
 
         return 0 if failed == 0 else 2
     finally:
         state.close()
+        if owns_session:
+            session.close(logger)
 
 
 def _load_urls(value: Path | None, direct_urls: tuple[str, ...], logger) -> list[str]:
@@ -671,6 +683,7 @@ def recover_media(
     sleep: str | float | SleepInterval = "0",
     assume_yes: bool = False,
     logger=None,
+    session: BrowserSession | None = None,
 ) -> int:
     logger = logger or setup_logging("recover")
     runtime_config = cfg.load_config_file()
@@ -705,12 +718,14 @@ def recover_media(
     target_rows = {url: (index, post_id) for index, post_id, url in _recovery_targets(state)}
     _log_target(target, logger)
 
-    cdp_url = _ensure_session(
+    owns_session = session is None
+    session = session or _ensure_session(
         target,
         start_url=direct_urls[0] if len(direct_urls) == 1 else None,
         logger=logger,
         assume_yes=assume_yes,
     )
+    cdp_url = session.cdp_url
 
     async def run() -> int:
         async with async_playwright() as p:
@@ -793,13 +808,15 @@ def recover_media(
                     pass
 
             logger.info(f"Done. completed={completed} skipped={skipped} failed={failed}")
-            logger.info("(Browser was left running untouched.)")
+            logger.info("Recovery stage complete.")
             return 0 if failed == 0 else 2
 
     try:
         return asyncio.run(run())
     finally:
         state.close()
+        if owns_session:
+            session.close(logger)
 
 
 def run_all(
@@ -814,30 +831,50 @@ def run_all(
     logger.info(f"Limit: {limit if limit is not None else 'all'}")
     sleep_interval = _sleep_interval(sleep)
     _log_sleep_interval(sleep_interval, logger)
-    logger.info("Stage 1: collect")
-    rc = collect_saved_posts(target, limit=limit, sleep=sleep, assume_yes=True, logger=logger)
-    if rc != 0:
-        logger.error("Collect failed. Stopping.")
-        return rc
 
-    logger.info("Stage 2: archive")
-    archive_rc = archive_posts(target, limit=limit, sleep=sleep, assume_yes=True, logger=logger)
-    if archive_rc not in (0, 2):
-        logger.error("Archive failed. Stopping.")
-        return archive_rc
-
-    if skip_recover:
-        logger.info("Recovery skipped.")
-        return 0
-
-    _write_failed_posts_file(archive_dir(), default_failed_posts_file(), logger)
-    logger.info("Stage 3: recover media")
-    recover_rc = recover_media(
-        target, input_file=default_failed_posts_file(), limit=limit, sleep=sleep, assume_yes=True, logger=logger
+    session = _ensure_session(
+        target,
+        start_url=cfg.SAVED_POSTS_URL,
+        logger=logger,
+        assume_yes=True,
     )
-    if recover_rc not in (0, 2):
-        return recover_rc
-    return 0 if archive_rc == 0 and recover_rc == 0 else 2
+    try:
+        logger.info("Stage 1: collect")
+        rc = collect_saved_posts(
+            target, limit=limit, sleep=sleep, assume_yes=True, logger=logger, session=session
+        )
+        if rc != 0:
+            logger.error("Collect failed. Stopping.")
+            return rc
+
+        logger.info("Stage 2: archive")
+        archive_rc = archive_posts(
+            target, limit=limit, sleep=sleep, assume_yes=True, logger=logger, session=session
+        )
+        if archive_rc not in (0, 2):
+            logger.error("Archive failed. Stopping.")
+            return archive_rc
+
+        if skip_recover:
+            logger.info("Recovery skipped.")
+            return 0
+
+        _write_failed_posts_file(archive_dir(), default_failed_posts_file(), logger)
+        logger.info("Stage 3: recover media")
+        recover_rc = recover_media(
+            target,
+            input_file=default_failed_posts_file(),
+            limit=limit,
+            sleep=sleep,
+            assume_yes=True,
+            logger=logger,
+            session=session,
+        )
+        if recover_rc not in (0, 2):
+            return recover_rc
+        return 0 if archive_rc == 0 and recover_rc == 0 else 2
+    finally:
+        session.close(logger)
 
 
 def list_profiles(*, browser: str | None = None, user_data_dir: str | None = None, logger=None) -> int:

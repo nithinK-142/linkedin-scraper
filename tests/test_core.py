@@ -251,3 +251,45 @@ def test_configured_cli_flags_are_exposed():
 
     result = runner.invoke(app, ["run", "--help"])
     assert "--skip-recover" in result.stdout
+
+
+def test_browser_session_tracks_process_ownership():
+    from linkedin_archiver.browser import BrowserSession
+
+    attached = BrowserSession("http://127.0.0.1:9222", port=9222)
+    assert not attached.owned
+    launched = BrowserSession("http://127.0.0.1:9223", port=9223, process=object())
+    assert launched.owned
+
+
+def test_browser_session_close_only_closes_owned_process(monkeypatch):
+    import sys
+    import types
+    from linkedin_archiver.browser import BrowserSession
+
+    class FakeProcess:
+        pid = 12345
+
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    attached = BrowserSession("http://127.0.0.1:9222", port=9222)
+    attached.close()
+    assert not attached.owned
+
+    process = FakeProcess()
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    owned = BrowserSession("http://127.0.0.1:9223", port=9223, process=process)
+    owned.close()
+    assert process.terminated
+    assert not owned.owned

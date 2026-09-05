@@ -4,7 +4,7 @@ Scrapes and archives LinkedIn saved posts with a real, already-logged-in Chromiu
 
 It saves:
 - post text and metadata
-- images and other normal media
+- attached media only
 - videos, including fragmented MP4 streams that LinkedIn serves to the browser
 
 ## Requirements
@@ -89,9 +89,9 @@ uv run linkedin-scraper recover --url "https://www.linkedin.com/feed/update/urn:
 
 ## Recovery
 
-`recover` is for posts that normal archiving cannot fully access, including company/agency posts that hit an authwall or return incomplete data.
+`recover` retries posts that normal archiving could not fully access, including company/agency posts that hit an authwall or return incomplete data. It first locates the target post, saves its content and metadata, then downloads only media belonging to that post.
 
-It captures normal media from the authenticated browser and keeps the existing fragmented-MP4 logic for videos:
+Fragmented video still uses the existing network capture path:
 
 ```text
 network capture → MP4/fMP4 box detection → fragment reconstruction → ffmpeg → ffprobe

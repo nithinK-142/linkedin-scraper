@@ -882,7 +882,7 @@ def run_all(
             logger.info("Recovery skipped.")
             return 0
 
-        logger.info("Stage 3: recover media")
+        logger.info("Stage 3: recover posts")
         recover_rc = recover_media(
             target,
             limit=limit,

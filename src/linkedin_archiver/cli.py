@@ -21,7 +21,7 @@ from linkedin_archiver.settings import (
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=True,
-    help="Archive LinkedIn saved posts and recover media through an authenticated Chromium session.",
+    help="Archive LinkedIn saved posts and recover posts and their attached media through an authenticated Chromium session.",
 )
 
 
